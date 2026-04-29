@@ -12,13 +12,29 @@ Two approaches to nonlinear probabilistic forecast reconciliation - (i) **via pr
 ### Installation
 
 * on linux
+```
 sudo apt update
-sudo apt install -y libtirpc-dev
-sudo apt install r-base-dev
-
-* install uv and set up environment
+sudo apt install -y libtirpc-dev r-base-dev
+#install uv and sync the project
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
+```
+
+* on macOS
+```
+# 1. Install R from CRAN for macOS
+# 2. Then install uv and sync the project
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+```
+
+* on Windows (Powershell)
+```
+# Install R for Windows from CRAN first
+
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv sync
+```
 
 ## Simulation
 
@@ -28,10 +44,13 @@ To reproduce the runtimes for different reconciliation methods, run the script `
 
 ## Demographic Rates of CH
 
+![CH_data_structure](fig/CH.png)
 
 The data is already downloaded and base forecasts are available. To reproduce the Relative CRPS run the script `CH/scripts/reconcile_hybrid.py` and to reproduce the runtimes run the script `CH/scripts/runtime.py`
 
 ## Australian tourism rate
+
+![AUS_data_structure](fig/aus.png)
 
 The data is already downloaded and base forecasts are available. To reproduce the Relative CRPS run the script `aus_tourism/scripts/reconcile_hybrid.py` and to reproduce the runtimes run the script `aus_tourism/scripts/runtime.py`
 
