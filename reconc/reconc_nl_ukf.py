@@ -62,44 +62,321 @@ def sample_multivariate_gaussian(mean: np.ndarray, cov: np.ndarray, n_samples: i
     return rng.multivariate_normal(mean, cov, size=n_samples)
 
 
-def unscented_transform(mu_x, Sigma_x, f, R, alpha=1e-3, beta=2, kappa=1):
+def unscented_transform(
+    mu_x,
+    Sigma_x,
+    f,
+    R,
+    alpha=1e-3,
+    beta=2.0,
+    lam=1.0,
+    gamma=3.0,
+):
+    """
+    Unscented Transform used for nonlinear Gaussian conditioning.
+
+    This version uses a calibrated fixed sigma-point spread:
+
+        gamma = 3
+
+    while keeping lambda fixed in the sigma-point weights.
+
+    Therefore, the sigma-point radius is not forced to satisfy:
+
+        gamma = sqrt(n + lambda)
+
+    This should be interpreted as a calibrated fixed-spread
+    sigma-point rule rather than the canonical covariance-matching
+    scaled unscented transform.
+
+    Parameters
+    ----------
+    mu_x : np.ndarray
+        Mean of the free variables, shape (n,).
+
+    Sigma_x : np.ndarray
+        Covariance matrix of the free variables, shape (n, n).
+
+    f : callable
+        Nonlinear function mapping free variables to constrained variables.
+
+    R : np.ndarray or scalar
+        Measurement-noise covariance.
+
+    alpha : float
+        Scaling parameter used in the central covariance weight.
+
+    beta : float
+        Prior-shape parameter. beta=2 is standard for Gaussian variables.
+
+    lam : float
+        Lambda used in the sigma-point weights.
+
+    gamma : float
+        Fixed sigma-point spread. For the experiments, gamma=3.
+    """
+    mu_x = np.asarray(
+        mu_x,
+        dtype=float,
+    ).reshape(-1)
+
+    Sigma_x = np.asarray(
+        Sigma_x,
+        dtype=float,
+    )
+
     n = mu_x.shape[0]
-    lam = 1
-    gamma = 3
 
-    Wm = np.full(2 * n + 1, 1 / (2 * (n + lam)))
-    Wc = np.copy(Wm)
-    Wm[0] = lam / (n + lam)
-    Wc[0] = Wm[0] + (1 - alpha ** 2 + beta)
-    S = np.linalg.cholesky(Sigma_x + 1e-9 * np.eye(n))
-    sigma_pts = np.zeros((2 * n + 1, n))
+    if Sigma_x.shape != (n, n):
+        raise ValueError(
+            f"Sigma_x must have shape {(n, n)}, "
+            f"got {Sigma_x.shape}"
+        )
+
+    R = np.atleast_2d(
+        np.asarray(
+            R,
+            dtype=float,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Symmetrize covariance
+    # --------------------------------------------------------
+
+    Sigma_x = 0.5 * (
+        Sigma_x
+        + Sigma_x.T
+    )
+
+    # --------------------------------------------------------
+    # Sigma-point weights
+    # --------------------------------------------------------
+
+    c = (
+        n
+        + lam
+    )
+
+    if c <= 0:
+        raise ValueError(
+            f"Invalid sigma-point scaling: n + lambda = {c}. "
+            "This must be positive."
+        )
+
+    Wm = np.full(
+        2 * n + 1,
+        1.0 / (
+            2.0
+            * c
+        ),
+        dtype=float,
+    )
+
+    Wc = Wm.copy()
+
+    Wm[0] = (
+        lam
+        / c
+    )
+
+    Wc[0] = (
+        Wm[0]
+        + (
+            1.0
+            - alpha ** 2
+            + beta
+        )
+    )
+
+    # --------------------------------------------------------
+    # Cholesky factor
+    # --------------------------------------------------------
+
+    S = np.linalg.cholesky(
+        Sigma_x
+        + 1e-9
+        * np.eye(n)
+    )
+
+    # --------------------------------------------------------
+    # Sigma points
+    # --------------------------------------------------------
+
+    sigma_pts = np.zeros(
+        (
+            2 * n + 1,
+            n,
+        ),
+        dtype=float,
+    )
+
     sigma_pts[0] = mu_x
+
     for i in range(n):
-        sigma_pts[i + 1] = mu_x + gamma * S[:, i]
-        sigma_pts[n + i + 1] = mu_x - gamma * S[:, i]
+        offset = (
+            gamma
+            * S[:, i]
+        )
 
-    z_sigma = np.array([f(pt) for pt in sigma_pts])
-    m = z_sigma.shape[1] if z_sigma.ndim > 1 else 1
-    z_sigma = z_sigma.reshape(2 * n + 1, m)
+        sigma_pts[i + 1] = (
+            mu_x
+            + offset
+        )
 
-    u_pred = np.sum(Wm[:, None] * z_sigma, axis=0)
+        sigma_pts[n + i + 1] = (
+            mu_x
+            - offset
+        )
+
+    # --------------------------------------------------------
+    # Propagate sigma points through nonlinear function
+    # --------------------------------------------------------
+
+    z_sigma = np.asarray([
+        f(point)
+        for point in sigma_pts
+    ])
+
+    if z_sigma.ndim == 1:
+        z_sigma = z_sigma[:, None]
+
+    elif z_sigma.ndim != 2:
+        raise ValueError(
+            "f must return either a scalar or a 1D array "
+            f"for each sigma point, got propagated shape "
+            f"{z_sigma.shape}"
+        )
+
+    m = z_sigma.shape[1]
+
+    if R.shape != (m, m):
+        raise ValueError(
+            f"R must have shape {(m, m)}, "
+            f"got {R.shape}"
+        )
+
+    # --------------------------------------------------------
+    # Predicted constrained mean
+    # --------------------------------------------------------
+
+    u_pred = np.sum(
+        Wm[:, None]
+        * z_sigma,
+        axis=0,
+    )
+
+    # --------------------------------------------------------
+    # Predicted constrained covariance and cross-covariance
+    # --------------------------------------------------------
 
     S_y = R.copy()
-    P_xy = np.zeros((n, m))
-    for i in range(2 * n + 1):
-        dz = z_sigma[i] - u_pred
-        dx = sigma_pts[i] - mu_x
-        S_y += Wc[i] * np.outer(dz, dz)
-        P_xy += Wc[i] * np.outer(dx, dz)
 
-    K = P_xy @ np.linalg.inv(S_y)
+    P_xy = np.zeros(
+        (
+            n,
+            m,
+        ),
+        dtype=float,
+    )
 
-    def condition_on(upper_base_forecasts: np.ndarray):
-        mu_post = mu_x + K @ (upper_base_forecasts - u_pred)
-        Sigma_post = Sigma_x - K @ S_y @ K.T
-        Sigma_post = (Sigma_post + Sigma_post.T) / 2  # Symmetrize
-        Sigma_post += 1e-6 * np.eye(Sigma_post.shape[0])  # Regularize
-        return mu_post, Sigma_post
+    for i in range(
+        2 * n + 1
+    ):
+        dz = (
+            z_sigma[i]
+            - u_pred
+        )
+
+        dx = (
+            sigma_pts[i]
+            - mu_x
+        )
+
+        S_y += (
+            Wc[i]
+            * np.outer(
+                dz,
+                dz,
+            )
+        )
+
+        P_xy += (
+            Wc[i]
+            * np.outer(
+                dx,
+                dz,
+            )
+        )
+
+    S_y = 0.5 * (
+        S_y
+        + S_y.T
+    )
+
+    S_y += (
+        1e-9
+        * np.eye(m)
+    )
+
+    # --------------------------------------------------------
+    # Kalman gain
+    # --------------------------------------------------------
+
+    K = np.linalg.solve(
+        S_y.T,
+        P_xy.T,
+    ).T
+
+    # --------------------------------------------------------
+    # Conditioning function
+    # --------------------------------------------------------
+
+    def condition_on(
+        constrained_base_forecasts,
+    ):
+        constrained_base_forecasts = np.asarray(
+            constrained_base_forecasts,
+            dtype=float,
+        ).reshape(-1)
+
+        if constrained_base_forecasts.size != m:
+            raise ValueError(
+                "constrained_base_forecasts must have "
+                f"length {m}, got "
+                f"{constrained_base_forecasts.size}"
+            )
+
+        mu_post = (
+            mu_x
+            + K
+            @ (
+                constrained_base_forecasts
+                - u_pred
+            )
+        )
+
+        Sigma_post = (
+            Sigma_x
+            - K
+            @ S_y
+            @ K.T
+        )
+
+        Sigma_post = 0.5 * (
+            Sigma_post
+            + Sigma_post.T
+        )
+
+        Sigma_post += (
+            1e-6
+            * np.eye(n)
+        )
+
+        return (
+            mu_post,
+            Sigma_post,
+        )
 
     return condition_on
 

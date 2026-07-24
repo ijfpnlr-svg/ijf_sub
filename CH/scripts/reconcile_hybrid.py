@@ -14,7 +14,7 @@ from functools import partial
 from scipy.linalg import block_diag
 import numpy as np
 import jax.numpy as jnp
-
+import pandas as pd
 
 def sync_any(x):
     if hasattr(x, "block_until_ready"):
@@ -363,6 +363,211 @@ def pbu_block(imm_bot, pop_bot, no_ind_pos):
 
 
 # -----------------------------
+# DM loss export utilities
+# -----------------------------
+
+def _mean_pairwise_euclidean_distance(samples, chunk_size=256):
+    """
+    Mean pairwise Euclidean distance for the energy score.
+
+    samples shape:
+        (M, R)
+    """
+    samples = np.asarray(samples, dtype=float)
+    n_samples = samples.shape[0]
+
+    if n_samples == 0:
+        return np.nan
+
+    total = 0.0
+    count = 0
+
+    for start in range(0, n_samples, chunk_size):
+        end = min(start + chunk_size, n_samples)
+        block = samples[start:end, :]
+
+        distances = np.linalg.norm(
+            block[:, None, :] - samples[None, :, :],
+            axis=2,
+        )
+
+        total += float(np.sum(distances))
+        count += (end - start) * n_samples
+
+    return total / count
+
+
+def compute_energy_loss_by_time(y_true, y_samples, rows_idx=None):
+    """
+    Compute one multivariate energy-score loss per time step.
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        Shape (R, T).
+
+    y_samples : np.ndarray
+        Shape (R, T, M).
+
+    rows_idx : array-like or None
+        Rows/level to evaluate. If None, all rows are used.
+
+    Returns
+    -------
+    np.ndarray
+        Shape (T,). One loss per time step.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_samples = np.asarray(y_samples, dtype=float)
+
+    if y_samples.ndim != 3:
+        raise ValueError(
+            f"y_samples must have shape (R,T,M), got {y_samples.shape}"
+        )
+
+    R, T, M = y_samples.shape
+
+    if y_true.shape != (R, T):
+        raise ValueError(
+            f"y_true must have shape {(R, T)}, got {y_true.shape}"
+        )
+
+    if rows_idx is None:
+        rows = np.arange(R)
+    else:
+        rows = np.asarray(rows_idx, dtype=int)
+
+    losses = np.full(T, np.nan, dtype=float)
+
+    for t in range(T):
+        X = y_samples[rows, t, :].T
+        y = y_true[rows, t]
+
+        term_1 = np.mean(
+            np.linalg.norm(
+                X - y[None, :],
+                axis=1,
+            )
+        )
+
+        term_2 = _mean_pairwise_euclidean_distance(X)
+
+        losses[t] = term_1 - 0.5 * term_2
+
+    return losses
+
+
+def compute_crps_loss_by_time(y_true, y_samples, rows_idx=None):
+    """
+    Compute one CRPS loss per time step.
+
+    At each time step, CRPS is averaged over the selected rows.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_samples = np.asarray(y_samples, dtype=float)
+
+    if y_samples.ndim != 3:
+        raise ValueError(
+            f"y_samples must have shape (R,T,M), got {y_samples.shape}"
+        )
+
+    R, T, M = y_samples.shape
+
+    if y_true.shape != (R, T):
+        raise ValueError(
+            f"y_true must have shape {(R, T)}, got {y_true.shape}"
+        )
+
+    if rows_idx is None:
+        rows = np.arange(R)
+    else:
+        rows = np.asarray(rows_idx, dtype=int)
+
+    losses = np.full(T, np.nan, dtype=float)
+
+    for t in range(T):
+        crps_rows = compute_crps(
+            y_true[rows, t],
+            y_samples[rows, t, :],
+        )
+
+        losses[t] = np.nanmean(crps_rows)
+
+    return losses
+
+
+def append_dm_loss_rows(
+    loss_rows,
+    target,
+    forecast_methods,
+    ground_truth,
+    levels,
+):
+    """
+    Append per-time-step losses for later Diebold-Mariano tests.
+
+    Output columns:
+        target, level, score, method, t, loss
+    """
+    for level_name, rows_idx in levels.items():
+        for method, y_hat in forecast_methods.items():
+            crps_losses = compute_crps_loss_by_time(
+                y_true=ground_truth,
+                y_samples=y_hat,
+                rows_idx=rows_idx,
+            )
+
+            es_losses = compute_energy_loss_by_time(
+                y_true=ground_truth,
+                y_samples=y_hat,
+                rows_idx=rows_idx,
+            )
+
+            for t, loss_value in enumerate(crps_losses):
+                loss_rows.append(
+                    {
+                        "target": target,
+                        "level": level_name,
+                        "score": "crps",
+                        "method": method,
+                        "t": t,
+                        "loss": loss_value,
+                    }
+                )
+
+            for t, loss_value in enumerate(es_losses):
+                loss_rows.append(
+                    {
+                        "target": target,
+                        "level": level_name,
+                        "score": "energy_score",
+                        "method": method,
+                        "t": t,
+                        "loss": loss_value,
+                    }
+                )
+
+
+def save_dm_loss_rows(loss_rows, loss_file):
+    if not loss_rows:
+        print("No DM losses to save.")
+        return
+
+    loss_df = pd.DataFrame(loss_rows)
+
+    loss_df = loss_df.sort_values(
+        [
+            "target",
+            "level",
+            "score",
+            "method",
+            "t",
+        ]
+    )
+
+    loss_df.to_csv(loss_file, index=False)
+
+# -----------------------------
 # Main
 # -----------------------------
 def main():
@@ -375,6 +580,13 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--iters", type=int, default=20)
     args = parser.parse_args()
+    results_folder = "../results"
+    os.makedirs(results_folder, exist_ok=True)
+
+    loss_file = os.path.join(
+        results_folder,
+        "swiss_demo_losses_by_time.csv",
+    )
 
     # ---- Load data ----
     with open(args.base_2_pkl, "rb") as f: base_2 = pickle.load(f)
@@ -412,6 +624,8 @@ def main():
         "immigration": {},
         "citizenship": {},
     }
+
+    loss_rows = []
 
     # -----------------------------
     # --- Recon Methods ---
@@ -1088,6 +1302,30 @@ def main():
     #plot_middle_ratios_3sigma("Immigration", base_imm, test_imm_data, U, uids=rat_uids, max_plots=26)
 
     #plot_middle_ratios_3sigma("Citizenship", base_cit, test_cit_data, U, uids=rat_uids, max_plots=26)
+    print("\n🔹 Saving per-time-step losses for DM tests")
+
+    append_dm_loss_rows(
+        loss_rows=loss_rows,
+        target="immigration",
+        forecast_methods=methods_imm,
+        ground_truth=test_imm_data,
+        levels=show_levels,
+    )
+
+    append_dm_loss_rows(
+        loss_rows=loss_rows,
+        target="citizenship",
+        forecast_methods=methods_cit,
+        ground_truth=test_cit_data,
+        levels=show_levels,
+    )
+
+    save_dm_loss_rows(
+        loss_rows=loss_rows,
+        loss_file=loss_file,
+    )
+
+    print(f"DM loss file saved to: {loss_file}")
 
     print("\n🔹 Computation times (seconds)")
     print(f"Immigration  - UKF :  {timing_summary['immigration']['UKF']:.4f}")

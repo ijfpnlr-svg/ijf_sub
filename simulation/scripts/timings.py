@@ -1,15 +1,24 @@
 import gc
 import time
 from pathlib import Path
+
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import jax.numpy as jnp
-from bayesreconpy.shrink_cov import _schafer_strimmer_cov as schafer_strimmer_cov
+
+from bayesreconpy.shrink_cov import (
+    _schafer_strimmer_cov as schafer_strimmer_cov,
+)
 
 from reconc.reconc_nl_ols import reconc_nl_ols
 from reconc.reconc_nl_ukf import reconc_nl_ukf
-from reconcile import f_surface, f_surface_jax, _to_precision
+from reconcile import (
+    f_surface,
+    f_surface_jax,
+    _to_precision,
+)
 
 
 # ============================================================
@@ -17,16 +26,66 @@ from reconcile import f_surface, f_surface_jax, _to_precision
 # ============================================================
 
 FC_FOLDER = Path("../forecasts")
-SURFACES = ["paraboloid", "saddle", "ripples"]
-#SAMPLE_SIZES = [1000, 2000, 5000, 10_000]
-SAMPLE_SIZES = [2000]
+
+OUT_FOLDER = Path("../results/complexity")
+OUT_FOLDER.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+SURFACES = [
+    "paraboloid",
+    "saddle",
+    "ripples",
+]
+
+DIMENSIONS = [
+    2,
+    10,
+    20,
+    50,
+    100,
+    200
+]
+
+SAMPLE_SIZES = [
+    500,
+    1000,
+    2000,
+    5000,
+    10000,
+    20000,
+]
+
+# One forecast time step only.
+T_IDX = 0
+
+# Number of timed repetitions per case.
 N_REPEATS = 3
+
+# Warm-up repetitions are excluded from timing.
+N_WARMUPS = 1
+
 N_ITER_OLS = 20
 SEED = 42
-T_IDX = 0   # single time step to benchmark
 
-RAW_OUT = "timings_raw.csv"
-SUMMARY_OUT = "timings_summary.csv"
+
+RAW_OUT = OUT_FOLDER / "timings_raw.csv"
+
+SUMMARY_OUT = (
+    OUT_FOLDER
+    / "timings_summary.csv"
+)
+
+SAMPLE_SCALING_OUT = (
+    OUT_FOLDER
+    / "timings_scaling_samples.csv"
+)
+
+DIMENSION_SCALING_OUT = (
+    OUT_FOLDER
+    / "timings_scaling_dimensions.csv"
+)
 
 
 # ============================================================
@@ -34,101 +93,871 @@ SUMMARY_OUT = "timings_summary.csv"
 # ============================================================
 
 def sync_any(x):
-    if hasattr(x, "block_until_ready"):
+    """
+    Block until all JAX computations contained in x
+    are complete.
+    """
+    if hasattr(
+        x,
+        "block_until_ready",
+    ):
         x.block_until_ready()
-    elif isinstance(x, dict):
-        for v in x.values():
-            sync_any(v)
-    elif isinstance(x, (list, tuple)):
-        for v in x:
-            sync_any(v)
+
+    elif isinstance(
+        x,
+        dict,
+    ):
+        for value in x.values():
+            sync_any(value)
+
+    elif isinstance(
+        x,
+        (list, tuple),
+    ):
+        for value in x:
+            sync_any(value)
+
     return x
 
 
-def timed_call(fn, *args, **kwargs):
+def timed_call(
+    fn,
+    *args,
+    **kwargs,
+):
+    """
+    Time one complete function call.
+
+    Garbage collection is performed before timing,
+    not during the timed interval.
+    """
+    gc.collect()
+
     t0 = time.perf_counter()
-    out = fn(*args, **kwargs)
-    sync_any(out)
-    elapsed = time.perf_counter() - t0
-    return out, elapsed
 
+    out = fn(
+        *args,
+        **kwargs,
+    )
 
-def load_case(surface: str, n_samples: int, fc_folder: Path):
-    base_path = fc_folder / f"base_fc_{surface}_indep_{n_samples}.pkl"
-    res_path  = fc_folder / f"residuals_{surface}_indep_{n_samples}.pkl"
-    te_path   = fc_folder / f"test_data_{surface}_indep_{n_samples}.pkl"
+    sync_any(
+        out
+    )
 
-    indep_base_fc = np.asarray(pd.read_pickle(base_path), dtype=np.float64)
-    indep_tr_res = np.asarray(pd.read_pickle(res_path), dtype=np.float64)
-    df_te = pd.read_pickle(te_path)
+    elapsed = (
+        time.perf_counter()
+        - t0
+    )
 
-    T = indep_base_fc.shape[1]
-    S = indep_base_fc.shape[2]
-
-    indep_tr_res = np.repeat(indep_tr_res[:, None, :], T, axis=1)
-
-    gt_test = df_te.iloc[:-1].values
-    return indep_base_fc, indep_tr_res, gt_test, T, S
+    return (
+        out,
+        elapsed,
+    )
 
 
 # ============================================================
-# TIMING FUNCTIONS (ONE TIME STEP ONLY)
+# DATA LOADING
 # ============================================================
 
-def time_full(indep_base_fc, indep_tr_res, surface, t_idx=0, n_iter=20, seed=42):
+def load_case(
+    surface: str,
+    dimension: int,
+    n_samples: int,
+    fc_folder: Path,
+):
+    """
+    Load one benchmark case.
+
+    Expected forecast shape:
+
+        (d + 1, T, S)
+
+    Expected residual shape:
+
+        (d + 1, Nres)
+    """
+    base_path = (
+        fc_folder
+        / (
+            f"base_fc_{surface}_"
+            f"d{dimension}_"
+            f"{n_samples}.pkl"
+        )
+    )
+
+    res_path = (
+        fc_folder
+        / (
+            f"residuals_{surface}_"
+            f"d{dimension}_"
+            f"{n_samples}.pkl"
+        )
+    )
+
+    if not base_path.exists():
+        raise FileNotFoundError(
+            f"Missing forecast file:\n"
+            f"{base_path}"
+        )
+
+    if not res_path.exists():
+        raise FileNotFoundError(
+            f"Missing residual file:\n"
+            f"{res_path}"
+        )
+
+    base_fc = np.asarray(
+        pd.read_pickle(
+            base_path
+        ),
+        dtype=np.float64,
+    )
+
+    tr_res = np.asarray(
+        pd.read_pickle(
+            res_path
+        ),
+        dtype=np.float64,
+    )
+
+    expected_variables = (
+        dimension
+        + 1
+    )
+
+    if base_fc.ndim != 3:
+        raise ValueError(
+            "base_fc must have shape "
+            "(d + 1, T, S), "
+            f"got {base_fc.shape}"
+        )
+
+    if tr_res.ndim != 2:
+        raise ValueError(
+            "tr_res must have shape "
+            "(d + 1, Nres), "
+            f"got {tr_res.shape}"
+        )
+
+    if (
+        base_fc.shape[0]
+        != expected_variables
+    ):
+        raise ValueError(
+            f"Expected {expected_variables} "
+            f"forecast variables for d={dimension}, "
+            f"got {base_fc.shape[0]}"
+        )
+
+    if (
+        tr_res.shape[0]
+        != expected_variables
+    ):
+        raise ValueError(
+            f"Expected {expected_variables} "
+            f"residual variables for d={dimension}, "
+            f"got {tr_res.shape[0]}"
+        )
+
+    T = base_fc.shape[1]
+    S = base_fc.shape[2]
+
+    if S != n_samples:
+        raise ValueError(
+            f"Requested n_samples={n_samples}, "
+            f"but loaded forecast array has S={S}"
+        )
+
+    if T_IDX >= T:
+        raise ValueError(
+            f"T_IDX={T_IDX} is out of range "
+            f"for T={T}"
+        )
+
+    return (
+        base_fc,
+        tr_res,
+    )
+
+
+# ============================================================
+# PROJECTION CONSTRAINT
+# ============================================================
+
+def make_projection_constraint(
+    surface: str,
+    dimension: int,
+):
+    """
+    Create one fixed-dimensional nonlinear constraint.
+
+    The constraint is:
+
+        U - f(B1, ..., Bd) = 0
+
+    The explicit access to z[dimension] is required so
+    that JNLR can infer the correct input dimension.
+    """
     def f_ols(z):
         u = z[0]
-        b1 = z[1]
-        b2 = z[2]
-        return jnp.array([u - f_surface_jax(surface, b1, b2)])
 
-    W = schafer_strimmer_cov(indep_tr_res[:, t_idx, :].T)["shrink_cov"]
-    P = _to_precision(W)
-    Z = indep_base_fc[:, t_idx, :].T
+        # Force JNLR to detect input size d + 1.
+        _ = z[dimension]
 
-    _, dt = timed_call(
-        reconc_nl_ols,
+        B = z[
+            1:dimension + 1
+        ]
+
+        return jnp.array([
+            u
+            - f_surface_jax(
+                surface=surface,
+                B=B,
+                axis=0,
+            )
+        ])
+
+    return f_ols
+
+
+# ============================================================
+# FULL-PRECISION PROJECTION
+# ============================================================
+
+def run_full_once(
+    base_fc,
+    tr_res,
+    f_ols,
+    t_idx=0,
+    n_iter=20,
+    seed=42,
+):
+    """
+    Run full-precision nonlinear projection for one
+    forecast time step.
+
+    The complete one-step operation is timed, including:
+
+        residual covariance estimation
+        precision matrix construction
+        reconciliation
+    """
+    W = schafer_strimmer_cov(
+        tr_res.T
+    )["shrink_cov"]
+
+    P = _to_precision(
+        W
+    )
+
+    # Shape:
+    #
+    #     (S, d + 1)
+    #
+    Z = base_fc[
+        :,
+        t_idx,
+        :,
+    ].T
+
+    return reconc_nl_ols(
         Z,
         f_ols,
         n_iter=n_iter,
         seed=seed,
         W=P,
     )
-    return dt
 
 
-def time_ukf(indep_base_fc, indep_tr_res, surface, t_idx=0, seed=42):
-    S = indep_base_fc.shape[2]
+# ============================================================
+# UKF
+# ============================================================
 
-    bot_base = indep_base_fc[1:, :, :]
-    bot_res = indep_tr_res[1:, :, :]
+def make_ukf_surface_function(
+    surface: str,
+):
+    """
+    Create the nonlinear mapping used by the UKF.
 
+    Input:
+
+        (d,)
+
+    Output:
+
+        scalar
+    """
     def f_ukf_vec(b):
-        b1, b2 = b[0], b[1]
-        return f_surface(surface, b1, b2)
+        return f_surface(
+            surface=surface,
+            B=b,
+            axis=0,
+        )
 
-    u_obs = np.mean(indep_base_fc[0, t_idx, :]).reshape(1,)
-    R = schafer_strimmer_cov(indep_tr_res[:, t_idx, :].T)["shrink_cov"][0, 0]
+    return f_ukf_vec
+
+
+def run_ukf_once(
+    base_fc,
+    tr_res,
+    surface,
+    dimension,
+    f_ukf_vec,
+    t_idx=0,
+    seed=42,
+):
+    """
+    Run UKF reconciliation for one forecast time step.
+
+    The complete one-step operation is timed, including:
+
+        construction of UKF inputs
+        covariance estimation inside reconc_nl_ukf
+        unscented transformation
+        posterior sampling
+    """
+    S = base_fc.shape[2]
+
+    # Shape:
+    #
+    #     (d, S)
+    #
+    bot_base = base_fc[
+        1:,
+        t_idx,
+        :,
+    ]
+
+    # Shape:
+    #
+    #     (d, Nres)
+    #
+    bot_res = tr_res[
+        1:,
+        :,
+    ]
+
+    # Upper point forecast.
+    u_obs = np.mean(
+        base_fc[
+            0,
+            t_idx,
+            :,
+        ]
+    ).reshape(
+        1,
+    )
+
+    # Upper residual covariance.
+    #
+    # Shape:
+    #
+    #     (1, 1)
+    #
+    R = np.atleast_2d(
+        schafer_strimmer_cov(
+            tr_res.T
+        )["shrink_cov"][0, 0]
+    )
 
     bot_list = []
-    for s in range(2):
-        bot_list.append({
-            "samples": bot_base[s, t_idx, :],
-            "residuals": bot_res[s, t_idx, :]
-        })
 
-    _, dt = timed_call(
-        reconc_nl_ukf,
+    for bottom_index in range(
+        dimension
+    ):
+        bot_list.append(
+            {
+                "samples": bot_base[
+                    bottom_index,
+                    :
+                ],
+
+                "residuals": bot_res[
+                    bottom_index,
+                    :
+                ],
+            }
+        )
+
+    return reconc_nl_ukf(
         bottom_base_forecasts=bot_list,
-        in_type=["samples"],
-        distr=["gaussian"],
+
+        in_type=[
+            "samples"
+        ] * dimension,
+
+        distr=[
+            "gaussian"
+        ] * dimension,
+
         f=f_ukf_vec,
+
         upper_base_forecasts=u_obs,
+
         R=R,
+
         num_samples=S,
+
         seed=seed,
     )
-    return dt
+
+
+# ============================================================
+# EMPIRICAL SCALING EXPONENT
+# ============================================================
+
+def estimate_scaling_exponent(
+    x,
+    y,
+):
+    """
+    Estimate the empirical exponent in:
+
+        time ~ x^exponent
+
+    by fitting:
+
+        log(time) = intercept + exponent * log(x)
+
+    Returns
+    -------
+    exponent : float
+
+    r_squared : float
+    """
+    x = np.asarray(
+        x,
+        dtype=float,
+    )
+
+    y = np.asarray(
+        y,
+        dtype=float,
+    )
+
+    valid = (
+        np.isfinite(x)
+        & np.isfinite(y)
+        & (x > 0)
+        & (y > 0)
+    )
+
+    x = x[valid]
+    y = y[valid]
+
+    if len(x) < 2:
+        return (
+            np.nan,
+            np.nan,
+        )
+
+    log_x = np.log(
+        x
+    )
+
+    log_y = np.log(
+        y
+    )
+
+    slope, intercept = np.polyfit(
+        log_x,
+        log_y,
+        deg=1,
+    )
+
+    fitted = (
+        intercept
+        + slope * log_x
+    )
+
+    ss_res = np.sum(
+        (
+            log_y
+            - fitted
+        ) ** 2
+    )
+
+    ss_tot = np.sum(
+        (
+            log_y
+            - np.mean(log_y)
+        ) ** 2
+    )
+
+    if ss_tot > 0:
+        r_squared = (
+            1.0
+            - ss_res / ss_tot
+        )
+    else:
+        r_squared = np.nan
+
+    return (
+        float(slope),
+        float(r_squared),
+    )
+
+
+# ============================================================
+# SAMPLE-SIZE SCALING ANALYSIS
+# ============================================================
+
+def compute_sample_scaling(
+    df_summary,
+):
+    """
+    Estimate runtime scaling with sample size:
+
+        time ~ S^alpha
+
+    separately for every:
+
+        surface
+        method
+        dimension
+    """
+    rows = []
+
+    grouped = df_summary.groupby(
+        [
+            "surface",
+            "method",
+            "dimension",
+        ]
+    )
+
+    for (
+        surface,
+        method,
+        dimension,
+    ), group in grouped:
+
+        group = group.sort_values(
+            "n_samples"
+        )
+
+        exponent, r_squared = (
+            estimate_scaling_exponent(
+                group[
+                    "n_samples"
+                ].values,
+
+                group[
+                    "mean_time_sec"
+                ].values,
+            )
+        )
+
+        rows.append(
+            {
+                "surface": surface,
+                "method": method,
+                "dimension": dimension,
+                "sample_size_exponent": exponent,
+                "r_squared": r_squared,
+            }
+        )
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# DIMENSION SCALING ANALYSIS
+# ============================================================
+
+def compute_dimension_scaling(
+    df_summary,
+):
+    """
+    Estimate runtime scaling with bottom dimension:
+
+        time ~ d^beta
+
+    separately for every:
+
+        surface
+        method
+        sample size
+    """
+    rows = []
+
+    grouped = df_summary.groupby(
+        [
+            "surface",
+            "method",
+            "n_samples",
+        ]
+    )
+
+    for (
+        surface,
+        method,
+        n_samples,
+    ), group in grouped:
+
+        group = group.sort_values(
+            "dimension"
+        )
+
+        exponent, r_squared = (
+            estimate_scaling_exponent(
+                group[
+                    "dimension"
+                ].values,
+
+                group[
+                    "mean_time_sec"
+                ].values,
+            )
+        )
+
+        rows.append(
+            {
+                "surface": surface,
+                "method": method,
+                "n_samples": n_samples,
+                "dimension_exponent": exponent,
+                "r_squared": r_squared,
+            }
+        )
+
+    return pd.DataFrame(
+        rows
+    )
+
+
+# ============================================================
+# PLOTTING
+# ============================================================
+
+def plot_time_vs_samples(
+    df_summary,
+):
+    """
+    Plot runtime versus sample size for each:
+
+        surface
+        dimension
+    """
+    for surface in SURFACES:
+        for dimension in DIMENSIONS:
+
+            subset = df_summary[
+                (
+                    df_summary[
+                        "surface"
+                    ]
+                    == surface
+                )
+                &
+                (
+                    df_summary[
+                        "dimension"
+                    ]
+                    == dimension
+                )
+            ]
+
+            if subset.empty:
+                continue
+
+            plt.figure(
+                figsize=(8, 5)
+            )
+
+            for method in [
+                "full",
+                "ukf",
+            ]:
+                tmp = subset[
+                    subset[
+                        "method"
+                    ]
+                    == method
+                ].sort_values(
+                    "n_samples"
+                )
+
+                plt.plot(
+                    tmp[
+                        "n_samples"
+                    ],
+                    tmp[
+                        "mean_time_sec"
+                    ],
+                    marker="o",
+                    label=method,
+                )
+
+            plt.xlabel(
+                "Number of forecast samples"
+            )
+
+            plt.ylabel(
+                "Mean computation time (s)"
+            )
+
+            plt.title(
+                f"Runtime vs sample size\n"
+                f"{surface}, d={dimension}, "
+                f"one time step"
+            )
+
+            plt.xticks(
+                SAMPLE_SIZES,
+                [
+                    f"{x:,}"
+                    for x in SAMPLE_SIZES
+                ],
+            )
+
+            plt.xscale(
+                "log"
+            )
+
+            plt.yscale(
+                "log"
+            )
+
+            plt.grid(
+                True,
+                which="both",
+                alpha=0.3,
+            )
+
+            plt.legend()
+
+            plt.tight_layout()
+
+            output_path = (
+                OUT_FOLDER
+                / (
+                    f"timings_vs_samples_"
+                    f"{surface}_"
+                    f"d{dimension}.png"
+                )
+            )
+
+            plt.savefig(
+                output_path,
+                dpi=300,
+            )
+
+            plt.close()
+
+
+def plot_time_vs_dimension(
+    df_summary,
+):
+    """
+    Plot runtime versus state dimension for each:
+
+        surface
+        sample size
+    """
+    for surface in SURFACES:
+        for n_samples in SAMPLE_SIZES:
+
+            subset = df_summary[
+                (
+                    df_summary[
+                        "surface"
+                    ]
+                    == surface
+                )
+                &
+                (
+                    df_summary[
+                        "n_samples"
+                    ]
+                    == n_samples
+                )
+            ]
+
+            if subset.empty:
+                continue
+
+            plt.figure(
+                figsize=(8, 5)
+            )
+
+            for method in [
+                "full",
+                "ukf",
+            ]:
+                tmp = subset[
+                    subset[
+                        "method"
+                    ]
+                    == method
+                ].sort_values(
+                    "dimension"
+                )
+
+                plt.plot(
+                    tmp[
+                        "dimension"
+                    ],
+                    tmp[
+                        "mean_time_sec"
+                    ],
+                    marker="o",
+                    label=method,
+                )
+
+            plt.xlabel(
+                "Number of bottom-level variables"
+            )
+
+            plt.ylabel(
+                "Mean computation time (s)"
+            )
+
+            plt.title(
+                f"Runtime vs dimension\n"
+                f"{surface}, S={n_samples:,}, "
+                f"one time step"
+            )
+
+            plt.xticks(
+                DIMENSIONS
+            )
+
+            plt.xscale(
+                "log"
+            )
+
+            plt.yscale(
+                "log"
+            )
+
+            plt.grid(
+                True,
+                which="both",
+                alpha=0.3,
+            )
+
+            plt.legend()
+
+            plt.tight_layout()
+
+            output_path = (
+                OUT_FOLDER
+                / (
+                    f"timings_vs_dimension_"
+                    f"{surface}_"
+                    f"S{n_samples}.png"
+                )
+            )
+
+            plt.savefig(
+                output_path,
+                dpi=300,
+            )
+
+            plt.close()
 
 
 # ============================================================
@@ -138,148 +967,580 @@ def time_ukf(indep_base_fc, indep_tr_res, surface, t_idx=0, seed=42):
 def main():
     rows = []
 
+    total_cases = (
+        len(SURFACES)
+        * len(DIMENSIONS)
+        * len(SAMPLE_SIZES)
+    )
+
+    case_counter = 0
+
     for surface in SURFACES:
-        print("\n===================================================")
-        print(f"Benchmarking surface: {surface}")
-        print("===================================================\n")
+        print()
+        print(
+            "=" * 70
+        )
+        print(
+            f"Benchmarking surface: {surface}"
+        )
+        print(
+            "=" * 70
+        )
 
-        for n_samples in SAMPLE_SIZES:
-            print(f"--- n_samples = {n_samples} ---")
+        for dimension in DIMENSIONS:
+            for n_samples in SAMPLE_SIZES:
 
-            indep_base_fc, indep_tr_res, gt_test, T, S = load_case(
-                surface=surface,
-                n_samples=n_samples,
-                fc_folder=FC_FOLDER,
-            )
+                case_counter += 1
 
-            if T_IDX >= T:
-                raise ValueError(f"T_IDX={T_IDX} is out of range for T={T}")
-
-            print(f"Loaded shape: base_fc = {indep_base_fc.shape}, T = {T}, S = {S}, t_idx = {T_IDX}")
-
-            for rep in range(1, N_REPEATS + 1):
-                print(f"  repeat {rep}/{N_REPEATS}")
-
-                dt_full = time_full(
-                    indep_base_fc=indep_base_fc,
-                    indep_tr_res=indep_tr_res,
-                    surface=surface,
-                    t_idx=T_IDX,
-                    n_iter=N_ITER_OLS,
-                    seed=SEED,
+                print()
+                print(
+                    "-" * 70
                 )
-                rows.append({
-                    "surface": surface,
-                    "n_samples": n_samples,
-                    "repeat": rep,
-                    "method": "full",
-                    "time_sec": dt_full,
-                    "t_idx": T_IDX,
-                    "T": T,
-                    "S": S,
-                })
 
-                dt_ukf = time_ukf(
-                    indep_base_fc=indep_base_fc,
-                    indep_tr_res=indep_tr_res,
-                    surface=surface,
-                    t_idx=T_IDX,
-                    seed=SEED,
+                print(
+                    f"Case {case_counter}/{total_cases}: "
+                    f"surface={surface}, "
+                    f"d={dimension}, "
+                    f"S={n_samples}"
                 )
-                rows.append({
-                    "surface": surface,
-                    "n_samples": n_samples,
-                    "repeat": rep,
-                    "method": "ukf",
-                    "time_sec": dt_ukf,
-                    "t_idx": T_IDX,
-                    "T": T,
-                    "S": S,
-                })
+
+                print(
+                    "-" * 70
+                )
+
+                # ====================================================
+                # LOAD ONE CASE
+                # ====================================================
+
+                (
+                    base_fc,
+                    tr_res,
+                ) = load_case(
+                    surface=surface,
+                    dimension=dimension,
+                    n_samples=n_samples,
+                    fc_folder=FC_FOLDER,
+                )
+
+                T = base_fc.shape[1]
+                S = base_fc.shape[2]
+
+                print(
+                    f"Loaded base_fc shape: "
+                    f"{base_fc.shape}"
+                )
+
+                print(
+                    f"Loaded residual shape: "
+                    f"{tr_res.shape}"
+                )
+
+                print(
+                    f"Benchmark time step: "
+                    f"t={T_IDX}"
+                )
+
+                # ====================================================
+                # CREATE FIXED FUNCTIONS ONCE FOR THIS CASE
+                # ====================================================
+
+                f_ols = make_projection_constraint(
+                    surface=surface,
+                    dimension=dimension,
+                )
+
+                f_ukf_vec = (
+                    make_ukf_surface_function(
+                        surface=surface,
+                    )
+                )
+
+                # ====================================================
+                # WARM-UP
+                #
+                # Especially important for JAX/JNLR.
+                #
+                # Warm-up timings are NOT recorded.
+                # ====================================================
+
+                print(
+                    f"Warm-up runs: {N_WARMUPS}"
+                )
+
+                for warmup in range(
+                    N_WARMUPS
+                ):
+                    print(
+                        f"  warm-up "
+                        f"{warmup + 1}/{N_WARMUPS}: "
+                        f"full"
+                    )
+
+                    out_full = run_full_once(
+                        base_fc=base_fc,
+                        tr_res=tr_res,
+                        f_ols=f_ols,
+                        t_idx=T_IDX,
+                        n_iter=N_ITER_OLS,
+                        seed=SEED,
+                    )
+
+                    sync_any(
+                        out_full
+                    )
+
+                    del out_full
+
+                    print(
+                        f"  warm-up "
+                        f"{warmup + 1}/{N_WARMUPS}: "
+                        f"ukf"
+                    )
+
+                    out_ukf = run_ukf_once(
+                        base_fc=base_fc,
+                        tr_res=tr_res,
+                        surface=surface,
+                        dimension=dimension,
+                        f_ukf_vec=f_ukf_vec,
+                        t_idx=T_IDX,
+                        seed=SEED,
+                    )
+
+                    sync_any(
+                        out_ukf
+                    )
+
+                    del out_ukf
+
+                    gc.collect()
+
+                # ====================================================
+                # TIMED REPEATS
+                # ====================================================
+
+                for rep in range(
+                    1,
+                    N_REPEATS + 1,
+                ):
+                    print(
+                        f"Timed repeat "
+                        f"{rep}/{N_REPEATS}"
+                    )
+
+                    # --------------------------------------------
+                    # FULL PROJECTION
+                    # --------------------------------------------
+
+                    out_full, dt_full = timed_call(
+                        run_full_once,
+
+                        base_fc=base_fc,
+
+                        tr_res=tr_res,
+
+                        f_ols=f_ols,
+
+                        t_idx=T_IDX,
+
+                        n_iter=N_ITER_OLS,
+
+                        seed=SEED,
+                    )
+
+                    rows.append(
+                        {
+                            "surface": surface,
+                            "dimension": dimension,
+                            "n_samples": n_samples,
+                            "repeat": rep,
+                            "method": "full",
+                            "time_sec": dt_full,
+                            "t_idx": T_IDX,
+                            "T": T,
+                            "S": S,
+                        }
+                    )
+
+                    print(
+                        f"  full: "
+                        f"{dt_full:.6f} s"
+                    )
+
+                    del out_full
+
+                    # --------------------------------------------
+                    # UKF
+                    # --------------------------------------------
+
+                    out_ukf, dt_ukf = timed_call(
+                        run_ukf_once,
+
+                        base_fc=base_fc,
+
+                        tr_res=tr_res,
+
+                        surface=surface,
+
+                        dimension=dimension,
+
+                        f_ukf_vec=f_ukf_vec,
+
+                        t_idx=T_IDX,
+
+                        seed=SEED,
+                    )
+
+                    rows.append(
+                        {
+                            "surface": surface,
+                            "dimension": dimension,
+                            "n_samples": n_samples,
+                            "repeat": rep,
+                            "method": "ukf",
+                            "time_sec": dt_ukf,
+                            "t_idx": T_IDX,
+                            "T": T,
+                            "S": S,
+                        }
+                    )
+
+                    print(
+                        f"  ukf:  "
+                        f"{dt_ukf:.6f} s"
+                    )
+
+                    del out_ukf
+
+                    gc.collect()
+
+                # ====================================================
+                # SAVE RAW CHECKPOINT
+                #
+                # Results are preserved after every case.
+                # ====================================================
+
+                df_checkpoint = pd.DataFrame(
+                    rows
+                )
+
+                df_checkpoint.to_csv(
+                    RAW_OUT,
+                    index=False,
+                )
+
+                print(
+                    f"Raw timing checkpoint saved to: "
+                    f"{RAW_OUT}"
+                )
+
+                # ====================================================
+                # RELEASE CASE MEMORY
+                # ====================================================
+
+                del base_fc
+                del tr_res
+                del f_ols
+                del f_ukf_vec
+
+                # Clear accumulated JAX compilation caches before
+                # moving to a new shape/dimension case.
+                jax.clear_caches()
 
                 gc.collect()
 
-    df_raw = pd.DataFrame(rows)
-    df_raw.to_csv(RAW_OUT, index=False)
+    # ============================================================
+    # RAW RESULTS
+    # ============================================================
+
+    df_raw = pd.DataFrame(
+        rows
+    )
+
+    df_raw.to_csv(
+        RAW_OUT,
+        index=False,
+    )
+
+    # ============================================================
+    # SUMMARY RESULTS
+    # ============================================================
 
     df_summary = (
         df_raw
-        .groupby(["surface", "method", "n_samples"], as_index=False)
-        .agg(
-            mean_time_sec=("time_sec", "mean"),
-            std_time_sec=("time_sec", "std"),
+        .groupby(
+            [
+                "surface",
+                "method",
+                "dimension",
+                "n_samples",
+            ],
+            as_index=False,
         )
-        .sort_values(["surface", "method", "n_samples"])
+        .agg(
+            mean_time_sec=(
+                "time_sec",
+                "mean",
+            ),
+
+            std_time_sec=(
+                "time_sec",
+                "std",
+            ),
+
+            median_time_sec=(
+                "time_sec",
+                "median",
+            ),
+
+            min_time_sec=(
+                "time_sec",
+                "min",
+            ),
+
+            max_time_sec=(
+                "time_sec",
+                "max",
+            ),
+        )
+        .sort_values(
+            [
+                "surface",
+                "method",
+                "dimension",
+                "n_samples",
+            ]
+        )
     )
-    df_summary.to_csv(SUMMARY_OUT, index=False)
 
-    print("\nRaw timings:")
-    print(df_raw)
+    df_summary.to_csv(
+        SUMMARY_OUT,
+        index=False,
+    )
 
-    print("\nSummary timings:")
-    print(df_summary)
+    # ============================================================
+    # EMPIRICAL SAMPLE-SIZE COMPLEXITY
+    # ============================================================
 
-    print("\nPivot table: mean seconds")
+    df_sample_scaling = (
+        compute_sample_scaling(
+            df_summary
+        )
+    )
+
+    df_sample_scaling.to_csv(
+        SAMPLE_SCALING_OUT,
+        index=False,
+    )
+
+    # ============================================================
+    # EMPIRICAL DIMENSION COMPLEXITY
+    # ============================================================
+
+    df_dimension_scaling = (
+        compute_dimension_scaling(
+            df_summary
+        )
+    )
+
+    df_dimension_scaling.to_csv(
+        DIMENSION_SCALING_OUT,
+        index=False,
+    )
+
+    # ============================================================
+    # PRINT RESULTS
+    # ============================================================
+
+    print()
+    print(
+        "=" * 100
+    )
+    print(
+        "TIMING SUMMARY"
+    )
+    print(
+        "=" * 100
+    )
+    print()
+
+    print(
+        df_summary.to_string(
+            index=False
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Mean runtime by sample size
+    # ------------------------------------------------------------
+
+    print()
+    print(
+        "=" * 100
+    )
+    print(
+        "MEAN RUNTIME BY SAMPLE SIZE"
+    )
+    print(
+        "=" * 100
+    )
+    print()
+
     print(
         df_summary.pivot_table(
-            index=["surface", "method"],
+            index=[
+                "surface",
+                "method",
+                "dimension",
+            ],
+
             columns="n_samples",
-            values="mean_time_sec"
+
+            values="mean_time_sec",
+        ).to_string(
+            float_format=lambda x: (
+                f"{x:.6f}"
+            )
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Mean runtime by dimension
+    # ------------------------------------------------------------
+
+    print()
+    print(
+        "=" * 100
+    )
+    print(
+        "MEAN RUNTIME BY DIMENSION"
+    )
+    print(
+        "=" * 100
+    )
+    print()
+
+    print(
+        df_summary.pivot_table(
+            index=[
+                "surface",
+                "method",
+                "n_samples",
+            ],
+
+            columns="dimension",
+
+            values="mean_time_sec",
+        ).to_string(
+            float_format=lambda x: (
+                f"{x:.6f}"
+            )
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Sample-size scaling exponents
+    # ------------------------------------------------------------
+
+    print()
+    print(
+        "=" * 100
+    )
+    print(
+        "EMPIRICAL SAMPLE-SIZE SCALING"
+    )
+    print(
+        "time ~ n_samples ^ exponent"
+    )
+    print(
+        "=" * 100
+    )
+    print()
+
+    print(
+        df_sample_scaling.to_string(
+            index=False,
+            float_format=lambda x: (
+                f"{x:.4f}"
+            ),
+        )
+    )
+
+    # ------------------------------------------------------------
+    # Dimension scaling exponents
+    # ------------------------------------------------------------
+
+    print()
+    print(
+        "=" * 100
+    )
+    print(
+        "EMPIRICAL DIMENSION SCALING"
+    )
+    print(
+        "time ~ dimension ^ exponent"
+    )
+    print(
+        "=" * 100
+    )
+    print()
+
+    print(
+        df_dimension_scaling.to_string(
+            index=False,
+            float_format=lambda x: (
+                f"{x:.4f}"
+            ),
         )
     )
 
     # ============================================================
-    # PLOT
+    # PLOTS
     # ============================================================
-    for surface_name in df_summary["surface"].unique():
-        plt.figure(figsize=(8, 5))
-        df_surface = df_summary[df_summary["surface"] == surface_name]
 
-        for method in df_surface["method"].unique():
-            tmp = df_surface[df_surface["method"] == method].sort_values("n_samples")
-            plt.plot(
-                tmp["n_samples"],
-                tmp["mean_time_sec"],
-                marker="o",
-                label=method
-            )
+    plot_time_vs_samples(
+        df_summary
+    )
 
-        plt.xlabel("n_samples")
-        plt.ylabel("Mean computation time (s)")
-        plt.title(f"One-step computation time vs sample size ({surface_name}, t={T_IDX})")
-        plt.xticks(SAMPLE_SIZES, [f"{x:,}" for x in SAMPLE_SIZES])
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"timings_plot_{surface_name}.png", dpi=300)
-        plt.show()
+    plot_time_vs_dimension(
+        df_summary
+    )
 
-    for surface_name in df_summary["surface"].unique():
-        plt.figure(figsize=(8, 5))
-        df_surface = df_summary[df_summary["surface"] == surface_name]
+    # ============================================================
+    # FINAL OUTPUT LOCATIONS
+    # ============================================================
 
-        for method in df_surface["method"].unique():
-            tmp = df_surface[df_surface["method"] == method].sort_values("n_samples")
-            plt.plot(
-                tmp["n_samples"],
-                tmp["mean_time_sec"],
-                marker="o",
-                label=method
-            )
+    print()
+    print(
+        "=" * 100
+    )
+    print(
+        "OUTPUT FILES"
+    )
+    print(
+        "=" * 100
+    )
 
-        plt.xlabel("n_samples")
-        plt.ylabel("Mean computation time (s)")
-        plt.title(f"One-step computation time vs sample size ({surface_name}, t={T_IDX})")
-        plt.xticks(SAMPLE_SIZES, [f"{x:,}" for x in SAMPLE_SIZES])
-        plt.yscale("log")
-        plt.grid(True, which="both", alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(f"timings_plot_{surface_name}_logy.png", dpi=300)
-        plt.show()
+    print(
+        f"Raw timings:\n"
+        f"  {RAW_OUT}"
+    )
 
-    print(f"\nSaved raw timings to: {RAW_OUT}")
-    print(f"Saved summary timings to: {SUMMARY_OUT}")
+    print(
+        f"Summary timings:\n"
+        f"  {SUMMARY_OUT}"
+    )
+
+    print(
+        f"Sample-size scaling:\n"
+        f"  {SAMPLE_SCALING_OUT}"
+    )
+
+    print(
+        f"Dimension scaling:\n"
+        f"  {DIMENSION_SCALING_OUT}"
+    )
+
 
 
 if __name__ == "__main__":
