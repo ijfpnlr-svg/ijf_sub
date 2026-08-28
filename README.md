@@ -41,6 +41,7 @@ uv sync
 * Run the scripts `generate_data.py` ➡️ `base_forecast.py` ➡️ `reconcile.py` in the given order from the folder `simulation/scripts` to reproduce the Relative CRPS score for the simulated surfaces.
 
 * To reproduce the runtimes for different reconciliation methods, run the script `simulation/scripts/runtime.py`.
+* To reproduce the MCS tests run the script `simulation/scripts/run_mcs_tests.py`
 
 ## Demographic Rates of CH
 
@@ -49,6 +50,7 @@ uv sync
 * The data is already downloaded and base forecasts are available. 
 * To reproduce the Relative CRPS run the script `CH/scripts/reconcile_hybrid.py`  
 * To reproduce the runtimes run the script `CH/scripts/runtime.py`
+* To reproduce the MCS tests run the script `CH/scripts/run_mcs_tests.py`
 
 ## Australian tourism rate
 
@@ -57,4 +59,8 @@ uv sync
 * The data is already downloaded and base forecasts are available. 
 * To reproduce the Relative CRPS run the script `aus_tourism/scripts/reconcile_hybrid.py` 
 * To reproduce the runtimes run the script `aus_tourism/scripts/runtime.py`
+* To reproduce the MCS tests run the script `aus_tourism/scripts/run_mcs_tests.py`
 
+## High dimension and sample size
+
+To be updated soon. 

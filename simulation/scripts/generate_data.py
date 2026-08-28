@@ -1,736 +1,302 @@
 import os
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (needed for 3D projection)
 
 
 # ----------------------------------------------------------------------
-# High-dimensional surface definitions
+# Surface definitions
 # ----------------------------------------------------------------------
 
-def _validate_bottom_matrix(B):
-    """Validate that B is a 2D array with shape (T, d)."""
-    B = np.asarray(B, dtype=float)
+def surface_paraboloid(b1, b2):
+    """Paraboloid: U = B1^2 + B2^2."""
+    return b1 ** 2 + b2 ** 2
 
-    if B.ndim != 2:
-        raise ValueError(
-            f"B must be 2D with shape (T, d), got {B.shape}"
-        )
+def surface_linear(b1, b2):
+    """Linear: U = B1 + B2."""
+    return b1 + b2
 
-    return B
+def surface_cone(b1, b2):
+    """Cone: U = sqrt(B1^2 + B2^2)."""
+    r2 = b1 ** 2 + b2 ** 2
+    return np.sqrt(np.maximum(r2, 0.0))
 
 
-def surface_paraboloid(B):
+def surface_saddle(b1, b2):
+    """Saddle: U = B1^2 - B2^2."""
+    return b1 ** 2 - b2 ** 2
+
+
+def surface_ripples(b1, b2):
+    """Ripple surface: U = sin(B1) + cos(B2)."""
+    return np.sin(b1) + np.cos(b2)
+
+
+def _normalize_to_unit_square(b):
     """
-    High-dimensional paraboloid:
-
-        U = B1^2 + B2^2 + ... + Bd^2
+    Affine-rescale a 1D array to [-1, 1], robustly.
+    If values are (almost) constant, return zeros.
     """
-    B = _validate_bottom_matrix(B)
+    b = np.asarray(b)
+    b_min = np.min(b)
+    b_max = np.max(b)
+    if np.isclose(b_max, b_min):
+        return np.zeros_like(b)
+    return 2.0 * (b - b_min) / (b_max - b_min) - 1.0
 
-    return np.sum(B ** 2, axis=1)
 
-
-def surface_linear(B):
+def surface_ratio(b1, b2, eps=1e-12):
     """
-    High-dimensional linear surface:
+    Ratio surface in [0,1]:
 
-        U = B1 + B2 + ... + Bd
+        U = new_b1 / (new_b1 + new_b2),
+
+    where new_b1 = exp(B1), new_b2 = exp(B2) > 0.
+    This ensures U is strictly between 0 and 1 and behaves like a share.
+    Now exp(B1) and exp(B2) are used directly as the new bottoms.
     """
-    B = _validate_bottom_matrix(B)
-
-    return np.sum(B, axis=1)
-
-
-def surface_saddle(B):
-    """
-    High-dimensional saddle:
-
-        U = sum(first half of B_j^2)
-            - sum(second half of B_j^2)
-
-    Examples
-    --------
-    d = 2:
-
-        U = B1^2 - B2^2
-
-    d = 10:
-
-        U = B1^2 + ... + B5^2
-            - B6^2 - ... - B10^2
-    """
-    B = _validate_bottom_matrix(B)
-
-    d = B.shape[1]
-
-    if d % 2 != 0:
-        raise ValueError(
-            f"Saddle surface requires an even number of dimensions, got d={d}"
-        )
-
-    half = d // 2
-
-    positive_part = np.sum(
-        B[:, :half] ** 2,
-        axis=1,
-    )
-
-    negative_part = np.sum(
-        B[:, half:] ** 2,
-        axis=1,
-    )
-
-    return positive_part - negative_part
-
-
-def surface_ripples(B):
-    """
-    High-dimensional ripple surface:
-
-        U = sin(B1) + cos(B2)
-            + sin(B3) + cos(B4)
-            + ...
-
-    For d = 2:
-
-        U = sin(B1) + cos(B2)
-    """
-    B = _validate_bottom_matrix(B)
-
-    U = np.zeros(
-        B.shape[0],
-        dtype=float,
-    )
-
-    # B1, B3, B5, ... use sine.
-    U += np.sum(
-        np.sin(B[:, 0::2]),
-        axis=1,
-    )
-
-    # B2, B4, B6, ... use cosine.
-    U += np.sum(
-        np.cos(B[:, 1::2]),
-        axis=1,
-    )
-
-    return U
+    b1 = np.asarray(b1)
+    b2 = np.asarray(b2)
+    #new_b1 = np.exp(b1)  # New bottom 1 (exp(B1))
+    #new_b2 = np.exp(b2)  # New bottom 2 (exp(B2))
+    denom = b1 + b2 + eps  # small eps to avoid any possible 0
+    return b1 / denom  # Surface ratio as expected
 
 
 SURFACES = {
     "paraboloid": surface_paraboloid,
+    "cone": surface_cone,
     "saddle": surface_saddle,
     "ripples": surface_ripples,
+    "ratio": surface_ratio,
     "linear": surface_linear,
 }
 
-
 # ----------------------------------------------------------------------
-# Independent bottom-level AR(1) generator
+# Bottom-level AR(1) generator
 # ----------------------------------------------------------------------
 
-def generate_ar_processes(
-    phi,
-    n_dimensions,
-    T=1000,
-    scale=0.1,
-    seed=42,
-    make_plots=False,
-):
+def generate_ar_processes(phi_1, phi_2, T=1000, case='independent',
+                          rho=0.95, scale=0.001, seed=42,
+                          make_plots=True):
     """
-    Generate d independent AR(1) processes.
-
-    Each bottom-level process follows:
-
-        B_j,t = phi_j * B_j,t-1 + epsilon_j,t
-
-    with:
-
-        epsilon_j,t ~ N(0, scale^2)
-
-    independently across dimensions.
-
-    Parameters
-    ----------
-    phi : float or array-like
-        AR(1) coefficient.
-
-        If scalar, the same value is used for every bottom-level process.
-
-        If array-like, it must contain one coefficient per bottom-level
-        process.
-
-    n_dimensions : int
-        Number of bottom-level time series.
-
-    T : int
-        Number of time steps.
-
-    scale : float
-        Standard deviation of the Gaussian innovations.
-
-    seed : int
-        Random seed.
-
-    make_plots : bool
-        If True, plot the generated bottom-level processes.
-
-    Returns
-    -------
-    B : np.ndarray
-        Array with shape (T, n_dimensions).
+    Generate two AR(1) processes B1, B2 with either independent or correlated noise.
     """
-    if n_dimensions < 1:
-        raise ValueError(
-            "n_dimensions must be at least 1"
-        )
+    np.random.seed(seed)
 
-    if T < 2:
-        raise ValueError(
-            "T must be at least 2"
-        )
+    b1 = np.zeros(T)
+    b2 = np.zeros(T)
 
-    if scale <= 0:
-        raise ValueError(
-            "scale must be positive"
-        )
-
-    rng = np.random.default_rng(seed)
-
-    phi = np.asarray(
-        phi,
-        dtype=float,
-    )
-
-    if phi.ndim == 0:
-        phi = np.full(
-            n_dimensions,
-            float(phi),
-        )
-
-    elif phi.ndim == 1 and phi.size == n_dimensions:
-        phi = phi.copy()
-
+    if case == 'independent':
+        eps_1 = np.random.normal(0, 0.1, T)
+        eps_2 = np.random.normal(0, 0.1, T)
+    elif case == 'correlated':
+        mean = [0, 0]
+        cov = [[1, rho], [rho, 1]]
+        eps = scale * np.random.multivariate_normal(mean, cov, T)
+        eps_1, eps_2 = eps[:, 0], eps[:, 1]
     else:
-        raise ValueError(
-            "phi must be either a scalar or a 1D array "
-            f"of length {n_dimensions}"
-        )
-
-    B = np.zeros(
-        (T, n_dimensions),
-        dtype=float,
-    )
-
-    innovations = rng.normal(
-        loc=0.0,
-        scale=scale,
-        size=(T, n_dimensions),
-    )
+        raise ValueError("case must be either 'independent' or 'correlated'")
 
     for t in range(1, T):
-        B[t, :] = (
-            phi * B[t - 1, :]
-            + innovations[t, :]
-        )
+        b1[t] = phi_1 * b1[t - 1] + eps_1[t]
+        b2[t] = phi_2 * b2[t - 1] + eps_2[t]
+
+    if case == 'correlated':
+        # Just to make structure visible in scatter plots
+        b1 *= 5e2
+        b2 *= 5e2
 
     if make_plots:
-        plot_bottom_processes(B)
-
-    return B
-
-
-# ----------------------------------------------------------------------
-# Bottom-level plotting
-# ----------------------------------------------------------------------
-
-def plot_bottom_processes(B):
-    """
-    Plot generated bottom-level processes.
-
-    For d=2:
-        - time-series plot
-        - phase plot
-
-    For d>2:
-        - time-series plot only
-    """
-    B = _validate_bottom_matrix(B)
-
-    _, d = B.shape
-
-    columns = [
-        f"B{i + 1}"
-        for i in range(d)
-    ]
-
-    df = pd.DataFrame(
-        B,
-        columns=columns,
-    )
-
-    if d == 2:
-        fig, ax = plt.subplots(
-            1,
-            2,
-            figsize=(12, 4),
-        )
-
-        df.plot(
-            ax=ax[0],
-        )
-
-        ax[0].set_title(
-            f"Bottom-level time series (d={d})"
-        )
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+        df = pd.DataFrame(np.vstack([b1, b2]).T, columns=['b1', 'b2'])
+        df.plot(ax=ax[0])
+        ax[0].set_title(f"Time series (case={case})")
         ax[0].set_xlabel("t")
         ax[0].set_ylabel("value")
 
-        ax[1].scatter(
-            df["B1"].values,
-            df["B2"].values,
-            s=2,
-        )
-
-        ax[1].set_xlabel("B1")
-        ax[1].set_ylabel("B2")
+        ax[1].scatter(df['b1'].values, df['b2'].values, s=1)
+        ax[1].set_xlabel("b1")
+        ax[1].set_ylabel("b2")
         ax[1].set_title("Phase plot")
 
-    else:
-        fig, ax = plt.subplots(
-            figsize=(12, 5),
-        )
+        plt.tight_layout()
+        plt.show()
 
-        df.plot(
-            ax=ax,
-            legend=(d <= 10),
-        )
-
-        ax.set_title(
-            f"Bottom-level time series (d={d})"
-        )
-        ax.set_xlabel("t")
-        ax.set_ylabel("value")
-
-    plt.tight_layout()
-    plt.show()
+    return b1, b2
 
 
 # ----------------------------------------------------------------------
-# 2D surface evaluation for plotting
-# ----------------------------------------------------------------------
-
-def evaluate_2d_surface(
-    b1,
-    b2,
-    surface_name,
-):
-    """
-    Evaluate one of the surfaces in the special d=2 case.
-
-    This helper is used only for visualization.
-    """
-    b1 = np.asarray(
-        b1,
-        dtype=float,
-    )
-
-    b2 = np.asarray(
-        b2,
-        dtype=float,
-    )
-
-    if b1.shape != b2.shape:
-        raise ValueError(
-            f"b1 and b2 must have the same shape, "
-            f"got {b1.shape} and {b2.shape}"
-        )
-
-    B = np.column_stack([
-        b1.ravel(),
-        b2.ravel(),
-    ])
-
-    surface_function = SURFACES.get(
-        surface_name
-    )
-
-    if surface_function is None:
-        raise ValueError(
-            f"Unknown surface '{surface_name}'. "
-            f"Available surfaces: {list(SURFACES)}"
-        )
-
-    U = surface_function(B)
-
-    return U.reshape(
-        b1.shape
-    )
-
-
-# ----------------------------------------------------------------------
-# Plotting utilities: 3D surface + scatter
+# Plotting utilities: robust 3D surface + scatter (matplotlib + Plotly)
 # ----------------------------------------------------------------------
 
 def _plotly_marker_size(scatter_size):
-    """
-    Map scatter_size to Plotly marker.size in pixels.
-    """
-    size = float(scatter_size)
-
-    if size <= 0:
+    """Map `scatter_size` to Plotly marker.size (pixels)."""
+    s = float(scatter_size)
+    if s <= 0:
         return 1
-
-    if size < 1.0:
-        return max(
-            1,
-            int(round(size * 4)),
-        )
-
-    return max(
-        1,
-        int(round(size)),
-    )
+    # If user passed <1 (intended for Matplotlib), scale up modestly
+    if s < 1.0:
+        return max(1, int(round(s * 4)))
+    return max(1, int(round(s)))
 
 
-def plot_3d_surface(
-    b1,
-    b2,
-    u,
-    surface_name,
-    grid_n=80,
-    surface_alpha=0.6,
-    scatter_size=1.5,
-    use_plotly=True,
-    pct_clip=(1, 99),
-):
+def plot_3d_surface(b1, b2, u, surface_name,
+                    grid_n=80, surface_alpha=0.6, scatter_size=0.5,
+                    use_plotly=True, pct_clip=(1, 99)):
     """
-    Plot a 2D-bottom / 1D-upper surface.
+    Plot a single surface + data points.
 
-    Used only when d=2.
+    - If `use_plotly=True`: opens a Plotly viewer (title contains only the surface name).
+    - Otherwise uses Matplotlib 3D.
+    - `scatter_size` is interpreted flexibly:
+      * for Matplotlib: `s = (max(0.1, scatter_size))**2` (points^2)
+      * for Plotly: `marker.size = int(...)` (pixels)
     """
-    if surface_name not in SURFACES:
-        raise ValueError(
-            f"Unknown surface '{surface_name}'. "
-            f"Available surfaces: {list(SURFACES)}"
-        )
+    surf_fun = SURFACES.get(surface_name)
+    if surf_fun is None:
+        raise ValueError(f"Unknown surface: {surface_name}")
 
-    b1 = np.asarray(
-        b1,
-        dtype=float,
-    )
+    b1 = np.asarray(b1)
+    b2 = np.asarray(b2)
+    u = np.asarray(u)
 
-    b2 = np.asarray(
-        b2,
-        dtype=float,
-    )
+    paired_samples = (u.ndim == 1 and b1.ndim == 1 and b2.ndim == 1 and u.size == b1.size == b2.size)
 
-    u = np.asarray(
-        u,
-        dtype=float,
-    )
+    # Build clipped grid
+    x_lin = np.linspace(np.percentile(b1, pct_clip[0]), np.percentile(b1, pct_clip[1]), grid_n)
+    y_lin = np.linspace(np.percentile(b2, pct_clip[0]), np.percentile(b2, pct_clip[1]), grid_n)
+    Xg, Yg = np.meshgrid(x_lin, y_lin)
 
-    if not (
-        b1.ndim == 1
-        and b2.ndim == 1
-        and u.ndim == 1
-        and b1.size == b2.size == u.size
-    ):
-        raise ValueError(
-            "b1, b2, and u must be paired 1D arrays "
-            "with the same length"
-        )
+    # Compute Zg robustly
+    try:
+        Zg = surf_fun(Xg.ravel(), Yg.ravel()).reshape(Xg.shape)
+    except Exception:
+        Zg = surf_fun(Xg, Yg)
 
-    x_lin = np.linspace(
-        np.percentile(
-            b1,
-            pct_clip[0],
-        ),
-        np.percentile(
-            b1,
-            pct_clip[1],
-        ),
-        grid_n,
-    )
-
-    y_lin = np.linspace(
-        np.percentile(
-            b2,
-            pct_clip[0],
-        ),
-        np.percentile(
-            b2,
-            pct_clip[1],
-        ),
-        grid_n,
-    )
-
-    Xg, Yg = np.meshgrid(
-        x_lin,
-        y_lin,
-    )
-
-    Zg = evaluate_2d_surface(
-        Xg,
-        Yg,
-        surface_name,
-    )
+    # For ratio surface, use exp(b1) and exp(b2) for x and z axes
+    if surface_name == "ratio":
+        exp_b1 = np.exp(Xg)  # exp(B1) for the x-axis
+        exp_b2 = np.exp(Yg)  # exp(B2) for the z-axis
+    else:
+        exp_b1 = Xg
+        exp_b2 = Yg
 
     if use_plotly:
         try:
             import plotly.graph_objects as go
+        except Exception as e:
+            raise RuntimeError("Plotly not available; install plotly or set use_plotly=False") from e
 
-        except ImportError as exc:
-            raise RuntimeError(
-                "Plotly is not available. "
-                "Install plotly or set use_plotly=False."
-            ) from exc
+        surf = go.Surface(x=exp_b1, y=exp_b2, z=Zg, colorscale='Viridis', opacity=surface_alpha, name='surface')
+        data = [surf]
+        if paired_samples:
+            p_size = _plotly_marker_size(scatter_size)
+            # For the ratio surface, use exp(b1) and exp(b2)
+            if surface_name == "ratio":
+                scatter = go.Scatter3d(x=np.exp(b1), y=np.exp(b2), z=u, mode='markers',
+                                       marker=dict(size=p_size, color='black'),
+                                       name='data')
+            else:
+                scatter = go.Scatter3d(x=b1, y=b2, z=u, mode='markers',
+                                       marker=dict(size=p_size, color='black'),
+                                       name='data')
+            data.append(scatter)
 
-        surface = go.Surface(
-            x=Xg,
-            y=Yg,
-            z=Zg,
-            colorscale="Viridis",
-            opacity=surface_alpha,
-            name="surface",
-        )
-
-        scatter = go.Scatter3d(
-            x=b1,
-            y=b2,
-            z=u,
-            mode="markers",
-            marker=dict(
-                size=_plotly_marker_size(
-                    scatter_size
-                ),
-                color="black",
-            ),
-            name="data",
-        )
-
-        fig = go.Figure(
-            data=[
-                surface,
-                scatter,
-            ]
-        )
-
-        fig.update_layout(
-            title=surface_name,
-            scene=dict(
-                xaxis_title="B1",
-                yaxis_title="B2",
-                zaxis_title="U",
-            ),
-        )
-
+        fig = go.Figure(data=data)
+        fig.update_layout(scene=dict(xaxis_title='B1',
+                                     yaxis_title='B2',
+                                     zaxis_title='U'),
+                          title=f"{surface_name}")
         fig.show()
-
         return fig
 
-    fig = plt.figure(
-        figsize=(9, 7),
-    )
 
-    ax = fig.add_subplot(
-        111,
-        projection="3d",
-    )
-
-    ax.plot_surface(
-        Xg,
-        Yg,
-        Zg,
-        alpha=surface_alpha,
-    )
-
-    ax.scatter(
-        b1,
-        b2,
-        u,
-        s=max(
-            0.1,
-            float(scatter_size),
-        ) ** 2,
-    )
-
-    ax.set_xlabel("B1")
-    ax.set_ylabel("B2")
-    ax.set_zlabel("U")
-    ax.set_title(surface_name)
-
-    plt.tight_layout()
-    plt.show()
-
-    return fig
 
 
 # ----------------------------------------------------------------------
-# Dataframe creation
-# ----------------------------------------------------------------------
-
-def create_dataset(
-    B,
-    U,
-):
-    """
-    Create a dataframe with columns:
-
-        U, B1, B2, ..., Bd
-    """
-    B = _validate_bottom_matrix(B)
-
-    U = np.asarray(
-        U,
-        dtype=float,
-    )
-
-    if U.ndim != 1:
-        raise ValueError(
-            f"U must be 1D, got {U.shape}"
-        )
-
-    if B.shape[0] != U.size:
-        raise ValueError(
-            "B and U must contain the same number "
-            f"of observations: {B.shape[0]} != {U.size}"
-        )
-
-    data = {
-        "U": U,
-    }
-
-    for j in range(B.shape[1]):
-        data[f"B{j + 1}"] = B[:, j]
-
-    return pd.DataFrame(data)
-
-
-# ----------------------------------------------------------------------
-# Main simulation
+# Main: generate AR(1) + multiple surfaces, save as pickles
 # ----------------------------------------------------------------------
 
 def main():
-    phi = 0.9
+    phi_1 = 0.9
+    phi_2 = 0.9
     T = 1000
-    scale = 0.1
+    data_folder = '../data/'
+    os.makedirs(data_folder, exist_ok=True)
 
-    data_folder = "../data/"
-    os.makedirs(
-        data_folder,
-        exist_ok=True,
-    )
+    cases = ['independent']
+    surfaces = ['paraboloid', 'saddle', 'ripples', 'ratio', 'linear']
 
-    dimensions = [
-        2,
-        10,
-        20,
-        50,
-        100,
-        200
-    ]
-
-    surfaces = [
-        "paraboloid",
-        "saddle",
-        "ripples",
-        "linear",
-    ]
-
-    for d in dimensions:
-        print()
-        print("=" * 70)
-        print(f"Bottom-level dimension: d={d}")
-        print("=" * 70)
-
-        # One independent AR realization per dimension.
-        # The same realization is reused for all surfaces.
-        B = generate_ar_processes(
-            phi=phi,
-            n_dimensions=d,
+    for case in cases:
+        # One AR realization per case, reused for all surfaces
+        b1, b2 = generate_ar_processes(
+            phi_1=phi_1,
+            phi_2=phi_2,
             T=T,
-            scale=scale,
+            case=case,
             seed=42,
-            make_plots=False,
+            make_plots=False,  # Disable 2D plot here
         )
 
-        U_for_plots = {}
+        case_tag = 'indep' if case == 'independent' else 'corr'
 
-        for surface_name in surfaces:
-            surface_function = SURFACES[
-                surface_name
-            ]
+        u_for_plots = []
+        for surface in surfaces:
+            surf_fun = SURFACES[surface]
+            # evaluate surface using broadcast-friendly inputs
+            try:
+                u = surf_fun(b1, b2)
+            except Exception:
+                # fallback: evaluate on meshgrid then ravel to match b1/b2 shapes if needed
+                B1, B2 = np.meshgrid(b1, b2)
+                u = surf_fun(B1, B2)
 
-            U = surface_function(B)
+            # prepare dataframe rows (flattened)
+            U_flat = np.ravel(u)
+            B1_flat = np.ravel(np.broadcast_to(b1, U_flat.shape))
+            B2_flat = np.ravel(np.broadcast_to(b2, U_flat.shape))
+            if surface == 'ratio':
+                # For ratio surface, save exp(b1), exp(b2)
+                B1_flat = np.ravel(np.exp(b1))
+                B2_flat = B1_flat + np.ravel(np.exp(b2))
+                df = pd.DataFrame({'U': U_flat, 'B1': B1_flat, 'B2': B2_flat})
 
-            df = create_dataset(
-                B=B,
-                U=U,
-            )
-
+            else:
+                df = pd.DataFrame({'U': U_flat, 'B1': B1_flat, 'B2': B2_flat})
             file_name = os.path.join(
                 data_folder,
-                f"{surface_name}_data_d{d}.pkl",
+                f'{surface}_data_{case_tag}.pkl'
             )
+            with open(file_name, 'wb') as f:
+                pd.to_pickle(df, f)
 
-            df.to_pickle(
-                file_name
-            )
+            print(f"Saved {file_name}")
 
-            print(
-                f"Saved {file_name} "
-                f"with shape {df.shape}"
-            )
+            # For plotting prefer paired 1D u matching b1/b2; otherwise None
+            if np.asarray(u).ndim == 1 and np.asarray(u).size == b1.size == b2.size:
+                u_for_plots.append(np.asarray(u))
+            else:
+                u_for_plots.append(None)
 
-            if d == 2:
-                U_for_plots[
-                    surface_name
-                ] = U
-
-        # 3D plots only for d=2.
-        if d == 2:
-            b1 = B[:, 0]
-            b2 = B[:, 1]
-
-            try:
-                for surface_name in surfaces:
-                    plot_3d_surface(
-                        b1=b1,
-                        b2=b2,
-                        u=U_for_plots[
-                            surface_name
-                        ],
-                        surface_name=surface_name,
-                        grid_n=80,
-                        surface_alpha=0.6,
-                        use_plotly=True,
-                        scatter_size=1.5,
-                    )
-
-            except Exception as exc:
-                print(
-                    "Plotly unavailable or failed. "
-                    "Falling back to Matplotlib:",
-                    exc,
-                )
-
-                for surface_name in surfaces:
-                    plot_3d_surface(
-                        b1=b1,
-                        b2=b2,
-                        u=U_for_plots[
-                            surface_name
-                        ],
-                        surface_name=surface_name,
-                        grid_n=60,
-                        surface_alpha=0.6,
-                        use_plotly=False,
-                        scatter_size=0.4,
-                    )
+        # Plot the ratio surface separately (one interactive Plotly window)
+        try:
+            for i, surface in enumerate(surfaces):
+                u_val = u_for_plots[i] if u_for_plots[i] is not None else np.zeros_like(b1)
+                # use Plotly for each surface (small markers); adjust scatter_size as needed
+                plot_3d_surface(b1, b2, u_val, surface,
+                                grid_n=80, surface_alpha=0.6,
+                                use_plotly=True, scatter_size=1.5)
+        except Exception as e:
+            # if Plotly not available or fails, fallback to Matplotlib separate plots
+            print("Plotly unavailable or failed, falling back to matplotlib plots:", e)
+            for i, surface in enumerate(surfaces):
+                u_val = u_for_plots[i] if u_for_plots[i] is not None else np.zeros_like(b1)
+                plot_3d_surface(b1, b2, u_val, surface,
+                                grid_n=60, surface_alpha=0.6,
+                                use_plotly=False, scatter_size=0.4)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

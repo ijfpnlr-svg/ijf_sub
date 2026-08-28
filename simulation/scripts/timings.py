@@ -14,7 +14,7 @@ from bayesreconpy.shrink_cov import (
 
 from reconc.reconc_nl_ols import reconc_nl_ols
 from reconc.reconc_nl_ukf import reconc_nl_ukf
-from reconcile import (
+from high_dim.scripts.reconcile import (
     f_surface,
     f_surface_jax,
     _to_precision,
