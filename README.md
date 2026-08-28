@@ -57,7 +57,7 @@ uv sync
 ![AUS_data_structure](fig/aus.png)
 
 * The data is already downloaded and base forecasts are available. 
-* To reproduce the Relative CRPS run the script `aus_tourism/scripts/reconcile_hybrid.py` 
+* To reproduce the Relative CRPS run the script `aus_tourism/scripts/reconcile_aus.py` 
 * To reproduce the runtimes run the script `aus_tourism/scripts/runtime.py`
 * To reproduce the MCS tests run the script `aus_tourism/scripts/run_mcs_tests.py`
 
