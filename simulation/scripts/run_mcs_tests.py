@@ -62,13 +62,24 @@ METHOD_LABELS = {
     "ukf": "UKF",
 }
 
+SURFACE_ORDER = [
+    "paraboloid",
+    "saddle",
+    "ripples",
+]
+
+SURFACE_LABELS = {
+    "paraboloid": "Paraboloid",
+    "saddle": "Saddle",
+    "ripples": "Ripples",
+}
+
 REFERENCE_METHOD = "base"
 
 ALPHA_VALUES = [
     0.05,
 ]
 
-# You can uncomment this if you also want the less conservative level.
 # ALPHA_VALUES = [
 #     0.05,
 #     0.075,
@@ -114,7 +125,9 @@ def load_crps_series_losses():
 
     missing = (
         required_columns
-        - set(df.columns)
+        - set(
+            df.columns
+        )
     )
 
     if missing:
@@ -175,7 +188,26 @@ def load_crps_series_losses():
 # UTILITIES
 # ============================================================
 
-def sanitize_for_filename(text):
+def normalize_group_key(
+    key,
+):
+    if isinstance(
+        key,
+        tuple,
+    ):
+        if len(
+            key
+        ) == 1:
+            return key[
+                0
+            ]
+
+    return key
+
+
+def sanitize_for_filename(
+    text,
+):
     text = str(
         text
     ).strip()
@@ -197,20 +229,39 @@ def sanitize_for_filename(text):
     )
 
 
-def alpha_tag(alpha):
+def alpha_tag(
+    alpha,
+):
     return (
         f"alpha{str(alpha).replace('.', 'p')}"
     )
 
 
-def method_display_name(method):
+def method_display_name(
+    method,
+):
     return METHOD_LABELS.get(
         method,
-        str(method),
+        str(
+            method
+        ),
     )
 
 
-def order_methods(methods):
+def surface_display_name(
+    surface,
+):
+    return SURFACE_LABELS.get(
+        surface,
+        str(
+            surface
+        ).title(),
+    )
+
+
+def order_methods(
+    methods,
+):
     methods = list(
         methods
     )
@@ -233,7 +284,9 @@ def order_methods(methods):
     )
 
 
-def resolve_block_length(n_obs):
+def resolve_block_length(
+    n_obs,
+):
     if BLOCK_LENGTH == "auto":
         return max(
             2,
@@ -308,12 +361,16 @@ def moving_block_bootstrap_indices(
         )
 
     return np.asarray(
-        indices[:n_obs],
+        indices[
+            :n_obs
+        ],
         dtype=int,
     )
 
 
-def safe_float_or_nan(value):
+def safe_float_or_nan(
+    value,
+):
     try:
         if pd.isna(
             value
@@ -331,7 +388,9 @@ def safe_float_or_nan(value):
 # CRPS STATISTIC
 # ============================================================
 
-def build_crps_tensor(group):
+def build_crps_tensor(
+    group,
+):
     methods = order_methods(
         group[
             "method"
@@ -384,9 +443,15 @@ def build_crps_tensor(group):
 
     tensor = np.full(
         (
-            len(times),
-            len(series_indices),
-            len(methods),
+            len(
+                times
+            ),
+            len(
+                series_indices
+            ),
+            len(
+                methods
+            ),
         ),
         np.nan,
         dtype=float,
@@ -445,7 +510,8 @@ def build_crps_tensor(group):
         )
 
     if (
-        tensor < 0.0
+        tensor
+        < 0.0
     ).any():
         raise ValueError(
             "CRPS losses must be non-negative."
@@ -700,7 +766,9 @@ def compute_pairwise_studentized_objects(
     )
 
     for boot_index in range(
-        bootstrap_t_statistic.shape[0]
+        bootstrap_t_statistic.shape[
+            0
+        ]
     ):
         np.fill_diagonal(
             bootstrap_t_statistic[
@@ -855,12 +923,16 @@ def compute_sequential_studentized_mcs_from_bootstrap_statistics(
         methods
     )
 
-    if observed_relative_scores.shape[0] != n_methods:
+    if observed_relative_scores.shape[
+        0
+    ] != n_methods:
         raise ValueError(
             "observed_relative_scores and methods have incompatible lengths."
         )
 
-    if bootstrap_relative_scores.shape[1] != n_methods:
+    if bootstrap_relative_scores.shape[
+        1
+    ] != n_methods:
         raise ValueError(
             "bootstrap_relative_scores and methods have incompatible lengths."
         )
@@ -932,6 +1004,7 @@ def compute_sequential_studentized_mcs_from_bootstrap_statistics(
     final_tr_statistic = np.nan
     final_critical_value = np.nan
     final_p_value = np.nan
+
     stopped_by_non_rejection = False
     ended_with_single_method = False
 
@@ -1117,7 +1190,9 @@ def compute_crps_mcs_group(
     bootstrap_relative_scores = np.zeros(
         (
             N_BOOTSTRAP,
-            len(methods),
+            len(
+                methods
+            ),
         ),
         dtype=float,
     )
@@ -1131,7 +1206,7 @@ def compute_crps_mcs_group(
             rng=rng,
         )
 
-        boot_mean_raw_scores, boot_relative_scores = compute_relative_crps_geomean(
+        _, boot_relative_scores = compute_relative_crps_geomean(
             crps_tensor=crps_tensor[
                 indices,
                 :,
@@ -1334,14 +1409,18 @@ def plot_mcs_group(
             max(
                 4.0,
                 0.45
-                * len(result_plot)
+                * len(
+                    result_plot
+                )
                 + 2.0,
             ),
         )
     )
 
     y_positions = np.arange(
-        len(result_plot)
+        len(
+            result_plot
+        )
     )
 
     labels = []
@@ -1375,7 +1454,9 @@ def plot_mcs_group(
     best_relative_crps = float(
         result_plot[
             "best_relative_crps"
-        ].iloc[0]
+        ].iloc[
+            0
+        ]
     )
 
     x_min = min(
@@ -1471,7 +1552,7 @@ def plot_mcs_group(
     )
 
     ax.set_title(
-        rf"{target}: sequential studentized MCS, $\alpha={alpha}$"
+        rf"{surface_display_name(target)}: sequential studentized MCS, $\alpha={alpha}$"
     )
 
     ax.grid(
@@ -1570,17 +1651,23 @@ def plot_mcs_elimination_steps(
         stopped_by_non_rejection = bool(
             group[
                 "stopped_by_non_rejection"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
         )
 
         ended_with_single_method = bool(
             group[
                 "ended_with_single_method"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
         )
 
         if stopped_by_non_rejection:
-            if len(step_numbers) == 0:
+            if len(
+                step_numbers
+            ) == 0:
                 final_step = 1
             else:
                 final_step = max(
@@ -1595,7 +1682,9 @@ def plot_mcs_elimination_steps(
                 float(
                     group[
                         "final_tr_statistic"
-                    ].iloc[0]
+                    ].iloc[
+                        0
+                    ]
                 )
             )
 
@@ -1603,7 +1692,9 @@ def plot_mcs_elimination_steps(
                 float(
                     group[
                         "final_critical_value"
-                    ].iloc[0]
+                    ].iloc[
+                        0
+                    ]
                 )
             )
 
@@ -1611,7 +1702,9 @@ def plot_mcs_elimination_steps(
                 "stop"
             )
 
-        if len(step_numbers) == 0:
+        if len(
+            step_numbers
+        ) == 0:
             continue
 
         fig, ax = plt.subplots(
@@ -1676,7 +1769,7 @@ def plot_mcs_elimination_steps(
         )
 
         ax.set_title(
-            rf"{target}: sequential MCS test path, $\alpha={alpha}$"
+            rf"{surface_display_name(target)}: sequential MCS test path, $\alpha={alpha}$"
         )
 
         ax.set_xticks(
@@ -1797,15 +1890,21 @@ def write_text_summary(
 
         best_method_label = group[
             "best_method_label"
-        ].iloc[0]
+        ].iloc[
+            0
+        ]
 
         best_relative_crps = group[
             "best_relative_crps"
-        ].iloc[0]
+        ].iloc[
+            0
+        ]
 
         final_active_best_method_label = group[
             "final_active_best_method_label"
-        ].iloc[0]
+        ].iloc[
+            0
+        ]
 
         confidence_set = group[
             group[
@@ -1826,13 +1925,17 @@ def write_text_summary(
         stopped_by_non_rejection = bool(
             group[
                 "stopped_by_non_rejection"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
         )
 
         ended_with_single_method = bool(
             group[
                 "ended_with_single_method"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
         )
 
         lines.append(
@@ -1862,15 +1965,21 @@ def write_text_summary(
         if stopped_by_non_rejection:
             final_p_value = group[
                 "final_p_value"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
 
             final_tr_statistic = group[
                 "final_tr_statistic"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
 
             final_critical_value = group[
                 "final_critical_value"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
 
             lines.append(
                 f"Final EPA test: T_R = {final_tr_statistic:.4f}, "
@@ -1929,7 +2038,9 @@ def write_text_summary(
 # LATEX TABLE OUTPUT
 # ============================================================
 
-def latex_escape(text):
+def latex_escape(
+    text,
+):
     text = str(
         text
     )
@@ -1950,7 +2061,10 @@ def latex_escape(text):
     return text
 
 
-def latex_float(value, digits=4):
+def latex_float(
+    value,
+    digits=4,
+):
     if pd.isna(
         value
     ):
@@ -1959,19 +2073,257 @@ def latex_float(value, digits=4):
     return f"{float(value):.{digits}f}"
 
 
-def latex_bool(value):
-    return "Y" if bool(
-        value
-    ) else "N"
-
-
-def latex_alpha_label(alpha):
+def latex_alpha_label(
+    alpha,
+):
     return str(
         alpha
     ).replace(
         ".",
         "p",
     )
+
+
+def latex_method_cell(
+    method_label,
+    in_mcs_set,
+):
+    method_label = latex_escape(
+        method_label
+    )
+
+    if bool(
+        in_mcs_set
+    ):
+        return rf"\color{{brown}}{{\textbf{{{method_label}}}}}"
+
+    return method_label
+
+
+def ordered_targets_for_table(
+    summary_df,
+):
+    available_targets = list(
+        summary_df[
+            "target"
+        ].dropna().unique()
+    )
+
+    ordered = [
+        target
+        for target in SURFACE_ORDER
+        if target in available_targets
+    ]
+
+    extra = sorted(
+        target
+        for target in available_targets
+        if target not in ordered
+    )
+
+    return (
+        ordered
+        + extra
+    )
+
+
+def order_methods_by_mcs_retention_path(
+    target_df,
+):
+    """
+    Order methods for compact MCS membership table.
+
+    1. Retained methods first.
+    2. Retained methods ordered by increasing relative CRPS.
+    3. Eliminated methods afterwards.
+    4. Eliminated methods ordered in reverse elimination order, so the first
+       eliminated method appears at the bottom.
+    """
+
+    retained_df = target_df[
+        target_df[
+            "in_mcs_set"
+        ]
+    ].sort_values(
+        "relative_crps",
+        ascending=True,
+    )
+
+    eliminated_df = target_df[
+        ~target_df[
+            "in_mcs_set"
+        ]
+    ].sort_values(
+        "eliminated_step",
+        ascending=False,
+    )
+
+    return pd.concat(
+        [
+            retained_df,
+            eliminated_df,
+        ],
+        axis=0,
+        ignore_index=True,
+    )
+
+
+def write_combined_mcs_membership_table(
+    lines,
+    summary_df,
+    alpha,
+):
+    alpha_df = summary_df[
+        summary_df[
+            "alpha"
+        ]
+        == alpha
+    ].copy()
+
+    targets = ordered_targets_for_table(
+        alpha_df
+    )
+
+    ranked_by_target = {}
+
+    for target in targets:
+        target_df = alpha_df[
+            alpha_df[
+                "target"
+            ]
+            == target
+        ].copy()
+
+        ranked_by_target[
+            target
+        ] = order_methods_by_mcs_retention_path(
+            target_df
+        )
+
+    max_rows = max(
+        len(
+            group
+        )
+        for group in ranked_by_target.values()
+    )
+
+    column_spec = "c" * len(
+        targets
+    )
+
+    header = [
+        surface_display_name(
+            target
+        )
+        for target in targets
+    ]
+
+    if len(
+        ALPHA_VALUES
+    ) == 1:
+        label = "tab:sim_mcs_membership"
+    else:
+        label = (
+            f"tab:sim_mcs_membership_"
+            f"{latex_alpha_label(alpha)}"
+        )
+
+    lines.append("")
+    lines.append(
+        "% ============================================================"
+    )
+    lines.append(
+        "% Combined final MCS membership table"
+    )
+    lines.append(
+        "% ============================================================"
+    )
+    lines.append("")
+    lines.append(
+        r"\begin{table}[h!]"
+    )
+    lines.append(
+        r"    \centering"
+    )
+    lines.append(
+        f"    \\begin{{tabular}}{{{column_spec}}}"
+    )
+    lines.append(
+        r"    \toprule"
+    )
+    lines.append(
+        "     "
+        + " & ".join(
+            header
+        )
+        + r" \\"
+    )
+    lines.append(
+        r"    \midrule"
+    )
+
+    for row_index in range(
+        max_rows
+    ):
+        row_cells = []
+
+        for target in targets:
+            group = ranked_by_target[
+                target
+            ]
+
+            if row_index >= len(
+                group
+            ):
+                row_cells.append(
+                    ""
+                )
+                continue
+
+            row = group.iloc[
+                row_index
+            ]
+
+            row_cells.append(
+                latex_method_cell(
+                    method_label=row[
+                        "method_label"
+                    ],
+                    in_mcs_set=row[
+                        "in_mcs_set"
+                    ],
+                )
+            )
+
+        lines.append(
+            "     "
+            + " & ".join(
+                row_cells
+            )
+            + r" \\"
+        )
+
+    lines.append(
+        r"    \bottomrule"
+    )
+    lines.append(
+        r"    \end{tabular}"
+    )
+    lines.append(
+        r"    \caption{Outcome of the sequential studentized MCS procedure for the "
+        rf"simulation study at \(\alpha={alpha}\). "
+        r"Bold brown entries indicate the methods retained in the final model "
+        r"confidence set. Eliminated methods are ordered according to the "
+        r"sequential MCS elimination path, with the first eliminated method "
+        r"shown at the bottom.}"
+    )
+    lines.append(
+        f"    \\label{{{label}}}"
+    )
+    lines.append(
+        r"\end{table}"
+    )
+    lines.append("")
 
 
 def write_latex_tables(
@@ -2003,6 +2355,10 @@ def write_latex_tables(
         target,
     ), group in grouped:
 
+        target = normalize_group_key(
+            target
+        )
+
         eliminated = group[
             ~group[
                 "in_mcs_set"
@@ -2014,17 +2370,23 @@ def write_latex_tables(
         stopped_by_non_rejection = bool(
             group[
                 "stopped_by_non_rejection"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
         )
 
         ended_with_single_method = bool(
             group[
                 "ended_with_single_method"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
         )
 
         target_latex = latex_escape(
-            target
+            surface_display_name(
+                target
+            )
         )
 
         label_suffix = (
@@ -2080,15 +2442,21 @@ def write_latex_tables(
         if stopped_by_non_rejection:
             final_tr_statistic = group[
                 "final_tr_statistic"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
 
             final_critical_value = group[
                 "final_critical_value"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
 
             final_p_value = group[
                 "final_p_value"
-            ].iloc[0]
+            ].iloc[
+                0
+            ]
 
             lines.append(
                 "    "
@@ -2125,164 +2493,16 @@ def write_latex_tables(
         )
         lines.append("")
 
-    lines.append("")
-    lines.append(
-        "% ============================================================"
-    )
-    lines.append(
-        "% Final MCS membership tables"
-    )
-    lines.append(
-        "% ============================================================"
-    )
-    lines.append("")
-
-    grouped_membership = summary_df.groupby(
-        [
-            "target",
-        ],
-        dropna=False,
-    )
-
-    alpha_values = sorted(
+    for alpha in sorted(
         summary_df[
             "alpha"
         ].unique()
-    )
-
-    for target, group in grouped_membership:
-
-        reference_alpha = alpha_values[
-            0
-        ]
-
-        reference_group = group[
-            group[
-                "alpha"
-            ]
-            == reference_alpha
-        ].sort_values(
-            "relative_crps"
+    ):
+        write_combined_mcs_membership_table(
+            lines=lines,
+            summary_df=summary_df,
+            alpha=alpha,
         )
-
-        target_latex = latex_escape(
-            target
-        )
-
-        label_suffix = sanitize_for_filename(
-            target
-        )
-
-        lines.append(
-            r"\begin{table}[h!]"
-        )
-        lines.append(
-            r"    \centering"
-        )
-
-        column_spec = (
-            "l"
-            + "c"
-            * len(
-                alpha_values
-            )
-        )
-
-        lines.append(
-            f"    \\begin{{tabular}}{{{column_spec}}}"
-        )
-        lines.append(
-            r"    \toprule"
-        )
-
-        header = [
-            "Method",
-        ]
-
-        for alpha in alpha_values:
-            header.append(
-                rf"MCS at $\alpha={alpha}$"
-            )
-
-        lines.append(
-            "    "
-            + " & ".join(
-                header
-            )
-            + r" \\"
-        )
-
-        lines.append(
-            r"    \midrule"
-        )
-
-        for method_row in reference_group.itertuples(
-            index=False
-        ):
-            method = method_row.method
-
-            row_values = [
-                latex_escape(
-                    method_row.method_label
-                )
-            ]
-
-            for alpha in alpha_values:
-                alpha_group = group[
-                    group[
-                        "alpha"
-                    ]
-                    == alpha
-                ]
-
-                match = alpha_group[
-                    alpha_group[
-                        "method"
-                    ]
-                    == method
-                ]
-
-                if match.empty:
-                    row_values.append(
-                        "--"
-                    )
-
-                else:
-                    row_values.append(
-                        latex_bool(
-                            match[
-                                "in_mcs_set"
-                            ].iloc[0]
-                        )
-                    )
-
-            lines.append(
-                "    "
-                + " & ".join(
-                    row_values
-                )
-                + r" \\"
-            )
-
-        lines.append(
-            r"    \bottomrule"
-        )
-        lines.append(
-            r"    \end{tabular}"
-        )
-        lines.append(
-            "    "
-            r"\caption{Final sequential studentized MCS membership for the "
-            f"{target_latex} simulation surface. "
-            r"Entries indicate whether each method is retained in the final MCS set.}"
-        )
-        lines.append(
-            f"    \\label{{tab:sim_mcs_membership_{label_suffix}}}"
-        )
-        lines.append(
-            r"\end{table}"
-        )
-        lines.append("")
 
     latex_text = "\n".join(
         lines
@@ -2332,6 +2552,10 @@ def main():
     for alpha in ALPHA_VALUES:
 
         for target, group in grouped_crps:
+
+            target = normalize_group_key(
+                target
+            )
 
             print()
             print(

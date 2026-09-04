@@ -26,12 +26,12 @@ OUTPUT_PREFIX = "australian_tourism"
 
 MCS_SUMMARY_FILE = os.path.join(
     RESULTS_FOLDER,
-    f"{OUTPUT_PREFIX}_sequential_studentized_mcs_crps_summary_alpha005_0075.csv",
+    f"{OUTPUT_PREFIX}_sequential_studentized_mcs_crps_summary.csv",
 )
 
 MCS_TEXT_SUMMARY_FILE = os.path.join(
     RESULTS_FOLDER,
-    f"{OUTPUT_PREFIX}_sequential_studentized_mcs_crps_interpretation_alpha005_0075.txt",
+    f"{OUTPUT_PREFIX}_sequential_studentized_mcs_crps_interpretation.txt",
 )
 
 MCS_LATEX_TABLE_FILE = os.path.join(
@@ -43,8 +43,6 @@ MCS_PLOT_FOLDER = os.path.join(
     RESULTS_FOLDER,
     f"{OUTPUT_PREFIX}_sequential_studentized_mcs_crps_plots",
 )
-
-
 
 METHOD_ORDER = [
     "base",
@@ -68,7 +66,6 @@ REFERENCE_METHOD = "base"
 
 ALPHA_VALUES = [
     0.05,
-    0.075,
 ]
 
 N_BOOTSTRAP = 1000
@@ -221,6 +218,15 @@ def sanitize_for_filename(text):
 def alpha_tag(alpha):
     return (
         f"alpha{str(alpha).replace('.', 'p')}"
+    )
+
+
+def latex_alpha_label(alpha):
+    return str(
+        alpha
+    ).replace(
+        ".",
+        "p",
     )
 
 
@@ -1983,19 +1989,182 @@ def latex_float(value, digits=4):
     return f"{float(value):.{digits}f}"
 
 
-def latex_bool(value):
-    return "Y" if bool(
-        value
-    ) else "N"
-
-
-def latex_alpha_label(alpha):
-    return str(
-        alpha
-    ).replace(
-        ".",
-        "p",
+def latex_method_cell(
+    method_label,
+    in_mcs_set,
+):
+    method_label = latex_escape(
+        method_label
     )
+
+    if bool(
+        in_mcs_set
+    ):
+        return rf"\color{{brown}}{{\textbf{{{method_label}}}}}"
+
+    return method_label
+
+
+def format_target_label(target):
+    target = str(
+        target
+    ).replace(
+        "_",
+        " "
+    ).title()
+
+    if target.lower() == "tourism":
+        return "Australian Tourism"
+
+    return target
+
+
+def order_methods_by_mcs_retention_path(
+    group,
+):
+    retained_df = group[
+        group[
+            "in_mcs_set"
+        ]
+    ].sort_values(
+        "relative_crps",
+        ascending=True,
+    )
+
+    eliminated_df = group[
+        ~group[
+            "in_mcs_set"
+        ]
+    ].sort_values(
+        "eliminated_step",
+        ascending=False,
+    )
+
+    return pd.concat(
+        [
+            retained_df,
+            eliminated_df,
+        ],
+        axis=0,
+        ignore_index=True,
+    )
+
+
+def write_single_column_mcs_membership_table(
+    lines,
+    summary_df,
+):
+    grouped_membership = summary_df.groupby(
+        [
+            "alpha",
+            "target",
+            "level",
+        ],
+        dropna=False,
+    )
+
+    for (
+        alpha,
+        target,
+        level,
+    ), group in grouped_membership:
+
+        group_ordered = order_methods_by_mcs_retention_path(
+            group
+        )
+
+        target_latex = latex_escape(
+            format_target_label(
+                target
+            )
+        )
+
+        level_latex = latex_escape(
+            level
+        )
+
+        label_suffix = (
+            f"{sanitize_for_filename(target)}_"
+            f"{sanitize_for_filename(level)}"
+        )
+
+        if abs(
+            float(alpha)
+            - 0.05
+        ) < 1e-12:
+            label = (
+                f"tab:mcs_membership_{label_suffix}"
+            )
+        else:
+            label = (
+                f"tab:mcs_membership_{label_suffix}_"
+                f"{latex_alpha_label(alpha)}"
+            )
+
+        lines.append("")
+        lines.append(
+            "% ============================================================"
+        )
+        lines.append(
+            "% Final MCS membership table"
+        )
+        lines.append(
+            "% ============================================================"
+        )
+        lines.append("")
+        lines.append(
+            r"\begin{table}[h!]"
+        )
+        lines.append(
+            r"    \centering"
+        )
+        lines.append(
+            r"    \begin{tabular}{c}"
+        )
+        lines.append(
+            r"    \toprule"
+        )
+        lines.append(
+            f"     {target_latex} \\\\"
+        )
+        lines.append(
+            r"    \midrule"
+        )
+
+        for row in group_ordered.itertuples(
+            index=False
+        ):
+            lines.append(
+                "      "
+                + latex_method_cell(
+                    method_label=row.method_label,
+                    in_mcs_set=row.in_mcs_set,
+                )
+                + r" \\"
+            )
+
+        lines.append(
+            r"    \bottomrule"
+        )
+        lines.append(
+            r"    \end{tabular}"
+        )
+        lines.append(
+            r"    \caption{Outcome of the sequential studentized MCS procedure for "
+            f"{target_latex}, level {level_latex}, at "
+            rf"\(\alpha={alpha}\). "
+            r"Bold brown entries indicate the methods retained in the final model "
+            r"confidence set. Eliminated methods are ordered according to the "
+            r"sequential MCS elimination path, with the first eliminated method "
+            r"shown at the bottom.}"
+        )
+        lines.append(
+            f"    \\label{{{label}}}"
+        )
+        lines.append(
+            r"\end{table}"
+        )
+        lines.append("")
 
 
 def write_latex_tables(
@@ -2156,169 +2325,10 @@ def write_latex_tables(
         )
         lines.append("")
 
-    lines.append("")
-    lines.append(
-        "% ============================================================"
+    write_single_column_mcs_membership_table(
+        lines=lines,
+        summary_df=summary_df,
     )
-    lines.append(
-        "% Final MCS membership tables"
-    )
-    lines.append(
-        "% ============================================================"
-    )
-    lines.append("")
-
-    grouped_membership = summary_df.groupby(
-        [
-            "target",
-            "level",
-        ],
-        dropna=False,
-    )
-
-    alpha_values = sorted(
-        summary_df[
-            "alpha"
-        ].unique()
-    )
-
-    for (
-        target,
-        level,
-    ), group in grouped_membership:
-
-        reference_alpha = alpha_values[
-            0
-        ]
-
-        reference_group = group[
-            group[
-                "alpha"
-            ]
-            == reference_alpha
-        ].sort_values(
-            "relative_crps"
-        )
-
-        target_latex = latex_escape(
-            target
-        )
-
-        level_latex = latex_escape(
-            level
-        )
-
-        label_suffix = (
-            f"{sanitize_for_filename(target)}_"
-            f"{sanitize_for_filename(level)}"
-        )
-
-        lines.append(
-            r"\begin{table}[h!]"
-        )
-        lines.append(
-            r"    \centering"
-        )
-
-        column_spec = "l" + "c" * len(
-            alpha_values
-        )
-
-        lines.append(
-            f"    \\begin{{tabular}}{{{column_spec}}}"
-        )
-        lines.append(
-            r"    \toprule"
-        )
-
-        header = [
-            "Method",
-        ]
-
-        for alpha in alpha_values:
-            header.append(
-                rf"MCS at $\alpha={alpha}$"
-            )
-
-        lines.append(
-            "    "
-            + " & ".join(
-                header
-            )
-            + r" \\"
-        )
-
-        lines.append(
-            r"    \midrule"
-        )
-
-        for method_row in reference_group.itertuples(
-            index=False
-        ):
-            method = method_row.method
-
-            row_values = [
-                latex_escape(
-                    method_row.method_label
-                )
-            ]
-
-            for alpha in alpha_values:
-                alpha_group = group[
-                    group[
-                        "alpha"
-                    ]
-                    == alpha
-                ]
-
-                match = alpha_group[
-                    alpha_group[
-                        "method"
-                    ]
-                    == method
-                ]
-
-                if match.empty:
-                    row_values.append(
-                        "--"
-                    )
-
-                else:
-                    row_values.append(
-                        latex_bool(
-                            match[
-                                "in_mcs_set"
-                            ].iloc[0]
-                        )
-                    )
-
-            lines.append(
-                "    "
-                + " & ".join(
-                    row_values
-                )
-                + r" \\"
-            )
-
-        lines.append(
-            r"    \bottomrule"
-        )
-        lines.append(
-            r"    \end{tabular}"
-        )
-        lines.append(
-            "    "
-            r"\caption{Final sequential studentized MCS membership for "
-            f"{target_latex}. "
-            r"Entries indicate whether each method is retained in the final MCS set.}"
-        )
-        lines.append(
-            f"    \\label{{tab:mcs_membership_{label_suffix}}}"
-        )
-        lines.append(
-            r"\end{table}"
-        )
-        lines.append("")
 
     latex_text = "\n".join(
         lines

@@ -27,6 +27,16 @@ MCS_CRPS_SERIES_LOSS_FILE = os.path.join(
     "reconciliation_crps_by_series_time.csv",
 )
 
+SIMULATION_SCORE_SUMMARY_FILE = os.path.join(
+    RESULTS_FOLDER,
+    "simulation_relative_scores_summary.csv",
+)
+
+SIMULATION_SCORE_LATEX_TABLE_FILE = os.path.join(
+    RESULTS_FOLDER,
+    "simulation_relative_scores_table.tex",
+)
+
 
 def sync_any(x):
     if hasattr(x, "block_until_ready"):
@@ -51,6 +61,7 @@ def _project_at_time_step_worker(task):
         u = z[0]
         b1 = z[1]
         b2 = z[2]
+
         return jnp.array(
             [
                 u
@@ -596,6 +607,326 @@ def append_crps_by_series_time_rows(
 
 
 # ============================================================
+# LATEX SCORE TABLE EXPORT
+# ============================================================
+
+def latex_escape(
+    text,
+):
+    text = str(
+        text
+    )
+
+    replacements = {
+        "_": r"\_",
+        "%": r"\%",
+        "&": r"\&",
+        "#": r"\#",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(
+            old,
+            new,
+        )
+
+    return text
+
+
+def format_score_cell(
+    value,
+    is_minimum,
+    decimals=2,
+):
+    if pd.isna(
+        value
+    ):
+        return "--"
+
+    text = f"{float(value):.{decimals}f}"
+
+    if is_minimum:
+        return rf"\textbf{{{text}}}"
+
+    return text
+
+
+def add_minimum_flags(
+    score_df,
+    decimals=2,
+):
+    """
+    Bold minima are determined after rounding to the displayed precision.
+
+    This makes the LaTeX table visually consistent: if several methods print
+    as 0.96 and 0.96 is the displayed minimum, all are bolded.
+    """
+
+    score_df = score_df.copy()
+
+    score_df[
+        "display_relative_score"
+    ] = score_df[
+        "relative_score"
+    ].round(
+        decimals
+    )
+
+    score_df[
+        "is_display_minimum"
+    ] = False
+
+    for (
+        score,
+        surface,
+    ), group in score_df.groupby(
+        [
+            "score",
+            "surface",
+        ],
+        dropna=False,
+    ):
+
+        minimum_display_score = group[
+            "display_relative_score"
+        ].min()
+
+        minimum_indices = group.index[
+            group[
+                "display_relative_score"
+            ]
+            == minimum_display_score
+        ]
+
+        score_df.loc[
+            minimum_indices,
+            "is_display_minimum",
+        ] = True
+
+    return score_df
+
+
+def write_simulation_score_latex_table(
+    score_summary_df,
+):
+    score_df = add_minimum_flags(
+        score_summary_df,
+        decimals=2,
+    )
+
+    surface_order = [
+        "paraboloid",
+        "saddle",
+        "ripples",
+    ]
+
+    method_groups = [
+        (
+            "Baseline",
+            [
+                "base",
+                "pbu",
+            ],
+        ),
+        (
+            "Projection",
+            [
+                "ols",
+                "wls",
+                "full",
+            ],
+        ),
+        (
+            r"\textit{Conditioning}",
+            [
+                "ukf",
+            ],
+        ),
+    ]
+
+    method_labels = {
+        "base": "Base",
+        "pbu": "PBU",
+        "ols": "OLS",
+        "wls": "WLS",
+        "full": "FULL",
+        "ukf": "UKF",
+    }
+
+    def get_cell(
+        score,
+        surface,
+        method,
+    ):
+        match = score_df[
+            (
+                score_df[
+                    "score"
+                ]
+                == score
+            )
+            & (
+                score_df[
+                    "surface"
+                ]
+                == surface
+            )
+            & (
+                score_df[
+                    "method"
+                ]
+                == method
+            )
+        ]
+
+        if match.empty:
+            return "--"
+
+        row = match.iloc[
+            0
+        ]
+
+        return format_score_cell(
+            value=row[
+                "relative_score"
+            ],
+            is_minimum=row[
+                "is_display_minimum"
+            ],
+            decimals=2,
+        )
+
+    lines = []
+
+    lines.append(
+        r"\begin{table}[h!]"
+    )
+    lines.append(
+        r"    \centering"
+    )
+    lines.append(
+        r"    \begin{tabular}{llcccccc}"
+    )
+    lines.append(
+        r"    \toprule"
+    )
+    lines.append(
+        r"    \multicolumn{2}{c}{\multirow{2}{*}{\textit{Methods}}} & "
+        r"\multicolumn{3}{c}{\textit{CRPS}} & "
+        r"\multicolumn{3}{c}{\textit{Energy Score}} \\"
+    )
+    lines.append(
+        r"    \cmidrule(l){3-5} \cmidrule(l){6-8}"
+    )
+    lines.append(
+        r"    & & "
+        r"\textbf{paraboloid} & \textbf{saddle} & \textbf{ripples} & "
+        r"\textbf{paraboloid} & \textbf{saddle} & \textbf{ripples} \\"
+    )
+    lines.append(
+        r"    \midrule"
+    )
+
+    first_group = True
+
+    for group_label, methods in method_groups:
+
+        if not first_group:
+            lines.append(
+                r"    \midrule"
+            )
+
+        first_group = False
+
+        for method_index, method in enumerate(
+            methods
+        ):
+
+            if len(
+                methods
+            ) > 1:
+                if method_index == 0:
+                    group_cell = (
+                        rf"\multirow{{{len(methods)}}}{{*}}{{{group_label}}}"
+                    )
+                else:
+                    group_cell = ""
+            else:
+                group_cell = group_label
+
+            method_cell = method_labels.get(
+                method,
+                method,
+            )
+
+            crps_cells = [
+                get_cell(
+                    score="crps",
+                    surface=surface,
+                    method=method,
+                )
+                for surface in surface_order
+            ]
+
+            energy_cells = [
+                get_cell(
+                    score="energy",
+                    surface=surface,
+                    method=method,
+                )
+                for surface in surface_order
+            ]
+
+            row_values = [
+                group_cell,
+                method_cell,
+            ] + crps_cells + energy_cells
+
+            lines.append(
+                "    "
+                + " & ".join(
+                    row_values
+                )
+                + r" \\"
+            )
+
+    lines.append(
+        r"    \bottomrule"
+    )
+    lines.append(
+        r"    \end{tabular}"
+    )
+    lines.append(
+        r"    \caption{Relative CRPS and Energy Score for the simulation study. "
+        r"The best method is highlighted in bold.}"
+    )
+    lines.append(
+        r"    \label{tab:simulation_study}"
+    )
+    lines.append(
+        r"\end{table}"
+    )
+
+    latex_text = "\n".join(
+        lines
+    )
+
+    with open(
+        SIMULATION_SCORE_LATEX_TABLE_FILE,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        file.write(
+            latex_text
+        )
+
+    print()
+    print(
+        f"Saved simulation LaTeX score table: {SIMULATION_SCORE_LATEX_TABLE_FILE}"
+    )
+
+
+# ============================================================
 # MAIN LOOP OVER ALL SURFACES
 # ============================================================
 
@@ -608,6 +939,8 @@ def main():
     )
 
     crps_by_series_time_rows = []
+
+    score_summary_rows = []
 
     surfaces = [
         "saddle",
@@ -675,7 +1008,7 @@ def main():
         )
 
         gt_test = df_te.iloc[
-            :-1
+            1:
         ].values
 
         indep_base_fc = np.array(
@@ -910,6 +1243,20 @@ def main():
                 else np.nan
             )
 
+            score_summary_rows.append(
+                {
+                    "surface": surface,
+                    "score": "energy",
+                    "method": key,
+                    "absolute_score": float(
+                        abs_es
+                    ),
+                    "relative_score": float(
+                        rel_es
+                    ),
+                }
+            )
+
             print(
                 f"  {key:<6} :  {rel_es:.2f}"
             )
@@ -945,9 +1292,27 @@ def main():
                 else np.nan
             )
 
+            score_summary_rows.append(
+                {
+                    "surface": surface,
+                    "score": "crps",
+                    "method": key,
+                    "absolute_score": float(
+                        abs_crps
+                    ),
+                    "relative_score": float(
+                        rel_crps
+                    ),
+                }
+            )
+
             print(
                 f"  {key:<6} :  {rel_crps:.2f}"
             )
+
+    # ============================================================
+    # EXPORT RESULTS
+    # ============================================================
 
     crps_by_series_time_df = pd.DataFrame(
         crps_by_series_time_rows
@@ -961,6 +1326,24 @@ def main():
     print()
     print(
         f"Saved CRPS losses for MCS: {MCS_CRPS_SERIES_LOSS_FILE}"
+    )
+
+    score_summary_df = pd.DataFrame(
+        score_summary_rows
+    )
+
+    score_summary_df.to_csv(
+        SIMULATION_SCORE_SUMMARY_FILE,
+        index=False,
+    )
+
+    print()
+    print(
+        f"Saved simulation relative score summary: {SIMULATION_SCORE_SUMMARY_FILE}"
+    )
+
+    write_simulation_score_latex_table(
+        score_summary_df=score_summary_df,
     )
 
     print(

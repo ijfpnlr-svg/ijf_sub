@@ -62,6 +62,16 @@ METHOD_LABELS = {
     "ukf": "UKF",
 }
 
+TARGET_ORDER = [
+    "immigration",
+    "citizenship",
+]
+
+TARGET_LABELS = {
+    "immigration": "Immigration",
+    "citizenship": "Citizenship",
+}
+
 REFERENCE_METHOD = "base"
 
 ALPHA = 0.05
@@ -112,7 +122,9 @@ def load_crps_series_losses():
 
     missing = (
         required_columns
-        - set(df.columns)
+        - set(
+            df.columns
+        )
     )
 
     if missing:
@@ -220,6 +232,13 @@ def method_display_name(method):
     )
 
 
+def target_display_name(target):
+    return TARGET_LABELS.get(
+        str(target).lower(),
+        str(target).title(),
+    )
+
+
 def order_methods(methods):
     methods = list(
         methods
@@ -235,6 +254,31 @@ def order_methods(methods):
         method
         for method in methods
         if method not in ordered
+    )
+
+    return (
+        ordered
+        + extra
+    )
+
+
+def ordered_targets_for_table(summary_df):
+    available_targets = list(
+        summary_df[
+            "target"
+        ].dropna().unique()
+    )
+
+    ordered = [
+        target
+        for target in TARGET_ORDER
+        if target in available_targets
+    ]
+
+    extra = sorted(
+        target
+        for target in available_targets
+        if target not in ordered
     )
 
     return (
@@ -455,7 +499,8 @@ def build_crps_tensor(group):
         )
 
     if (
-        tensor < 0.0
+        tensor
+        < 0.0
     ).any():
         raise ValueError(
             "CRPS losses must be non-negative."
@@ -1718,6 +1763,7 @@ def write_text_summary(
         text
     )
 
+
 # ============================================================
 # LATEX TABLE OUTPUT
 # ============================================================
@@ -1752,10 +1798,195 @@ def latex_float(value, digits=4):
     return f"{float(value):.{digits}f}"
 
 
-def latex_bool(value):
-    return "Y" if bool(
-        value
-    ) else "N"
+def latex_method_cell(
+    method_label,
+    in_mcs_set,
+):
+    method_label = latex_escape(
+        method_label
+    )
+
+    if bool(
+        in_mcs_set
+    ):
+        return rf"\color{{brown}}{{\textbf{{{method_label}}}}}"
+
+    return method_label
+
+
+def order_methods_by_mcs_retention_path(
+    target_df,
+):
+    retained_df = target_df[
+        target_df[
+            "in_mcs_set"
+        ]
+    ].sort_values(
+        "relative_crps",
+        ascending=True,
+    )
+
+    eliminated_df = target_df[
+        ~target_df[
+            "in_mcs_set"
+        ]
+    ].sort_values(
+        "eliminated_step",
+        ascending=False,
+    )
+
+    return pd.concat(
+        [
+            retained_df,
+            eliminated_df,
+        ],
+        axis=0,
+        ignore_index=True,
+    )
+
+
+def write_combined_swiss_mcs_membership_table(
+    lines,
+    summary_df,
+):
+    targets = ordered_targets_for_table(
+        summary_df
+    )
+
+    ranked_by_target = {}
+
+    for target in targets:
+        target_df = summary_df[
+            summary_df[
+                "target"
+            ]
+            == target
+        ].copy()
+
+        ranked_by_target[
+            target
+        ] = order_methods_by_mcs_retention_path(
+            target_df
+        )
+
+    max_rows = max(
+        len(
+            group
+        )
+        for group in ranked_by_target.values()
+    )
+
+    column_spec = "c" * len(
+        targets
+    )
+
+    header = [
+        target_display_name(
+            target
+        )
+        for target in targets
+    ]
+
+    alpha = summary_df[
+        "alpha"
+    ].iloc[0]
+
+    lines.append("")
+    lines.append(
+        "% ============================================================"
+    )
+    lines.append(
+        "% Final MCS membership table"
+    )
+    lines.append(
+        "% ============================================================"
+    )
+    lines.append("")
+    lines.append(
+        r"\begin{table}[h!]"
+    )
+    lines.append(
+        r"    \centering"
+    )
+    lines.append(
+        f"    \\begin{{tabular}}{{{column_spec}}}"
+    )
+    lines.append(
+        r"    \toprule"
+    )
+    lines.append(
+        "     "
+        + " & ".join(
+            header
+        )
+        + r" \\"
+    )
+    lines.append(
+        r"    \midrule"
+    )
+
+    for row_index in range(
+        max_rows
+    ):
+        row_cells = []
+
+        for target in targets:
+            group = ranked_by_target[
+                target
+            ]
+
+            if row_index >= len(
+                group
+            ):
+                row_cells.append(
+                    ""
+                )
+                continue
+
+            row = group.iloc[
+                row_index
+            ]
+
+            row_cells.append(
+                latex_method_cell(
+                    method_label=row[
+                        "method_label"
+                    ],
+                    in_mcs_set=row[
+                        "in_mcs_set"
+                    ],
+                )
+            )
+
+        lines.append(
+            "     "
+            + " & ".join(
+                row_cells
+            )
+            + r" \\"
+        )
+
+    lines.append(
+        r"    \bottomrule"
+    )
+    lines.append(
+        r"    \end{tabular}"
+    )
+    lines.append(
+        r"    \caption{Outcome of the sequential studentized MCS procedure for the "
+        rf"Swiss demographic datasets at \(\alpha={alpha}\). "
+        r"Bold brown entries indicate the methods retained in the final model "
+        r"confidence set. Eliminated methods are ordered according to the "
+        r"sequential MCS elimination path, with the first eliminated method "
+        r"shown at the bottom.}"
+    )
+    lines.append(
+        r"    \label{tab:swiss_mcs_membership}"
+    )
+    lines.append(
+        r"\end{table}"
+    )
+    lines.append("")
 
 
 def write_latex_tables(
@@ -1917,100 +2148,10 @@ def write_latex_tables(
         )
         lines.append("")
 
-    lines.append("")
-    lines.append(
-        "% ============================================================"
+    write_combined_swiss_mcs_membership_table(
+        lines=lines,
+        summary_df=summary_df,
     )
-    lines.append(
-        "% Final MCS membership tables"
-    )
-    lines.append(
-        "% ============================================================"
-    )
-    lines.append("")
-
-    grouped_membership = summary_df.groupby(
-        [
-            "target",
-            "level",
-        ],
-        dropna=False,
-    )
-
-    for (
-        target,
-        level,
-    ), group in grouped_membership:
-
-        group = group.sort_values(
-            "relative_crps"
-        )
-
-        alpha = group[
-            "alpha"
-        ].iloc[0]
-
-        target_latex = latex_escape(
-            target
-        )
-
-        level_latex = latex_escape(
-            level
-        )
-
-        label_suffix = (
-            f"{sanitize_for_filename(target)}_"
-            f"{sanitize_for_filename(level)}"
-        )
-
-        lines.append(
-            r"\begin{table}[h!]"
-        )
-        lines.append(
-            r"    \centering"
-        )
-        lines.append(
-            r"    \begin{tabular}{lc}"
-        )
-        lines.append(
-            r"    \toprule"
-        )
-        lines.append(
-            rf"    Method & MCS at $\alpha={alpha}$ \\"
-        )
-        lines.append(
-            r"    \midrule"
-        )
-
-        for row in group.itertuples(
-            index=False
-        ):
-            lines.append(
-                "    "
-                f"{latex_escape(row.method_label)} & "
-                f"{latex_bool(row.in_mcs_set)} "
-                r"\\"
-            )
-
-        lines.append(
-            r"    \bottomrule"
-        )
-        lines.append(
-            r"    \end{tabular}"
-        )
-        lines.append(
-            "    "
-            r"\caption{Final sequential studentized MCS membership for the Swiss "
-            f"{target_latex} dataset, level {level_latex}. "
-            r"Entries indicate whether each method is retained in the final MCS set.}"
-        )
-        lines.append(
-            f"    \\label{{tab:swiss_mcs_membership_{label_suffix}}}"
-        )
-        lines.append(
-            r"\end{table}"
-        )
-        lines.append("")
 
     latex_text = "\n".join(
         lines
@@ -2029,6 +2170,7 @@ def write_latex_tables(
     print(
         f"Saved LaTeX tables to: {MCS_LATEX_TABLE_FILE}"
     )
+
 
 # ============================================================
 # MAIN

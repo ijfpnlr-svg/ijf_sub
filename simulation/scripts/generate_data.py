@@ -66,11 +66,11 @@ def surface_ratio(b1, b2, eps=1e-12):
 
 SURFACES = {
     "paraboloid": surface_paraboloid,
-    "cone": surface_cone,
+    #"cone": surface_cone,
     "saddle": surface_saddle,
     "ripples": surface_ripples,
-    "ratio": surface_ratio,
-    "linear": surface_linear,
+    #"ratio": surface_ratio,
+    #"linear": surface_linear,
 }
 
 # ----------------------------------------------------------------------
@@ -227,7 +227,7 @@ def main():
     os.makedirs(data_folder, exist_ok=True)
 
     cases = ['independent']
-    surfaces = ['paraboloid', 'saddle', 'ripples', 'ratio', 'linear']
+    surfaces = ['paraboloid', 'saddle', 'ripples'] #, 'ratio', 'linear']
 
     for case in cases:
         # One AR realization per case, reused for all surfaces

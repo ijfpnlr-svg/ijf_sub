@@ -12,43 +12,64 @@ from sklearn.ensemble import RandomForestRegressor
 # Helper function to create lagged features
 # ================================
 
-def make_lagged_xy(series: pd.Series, p: int):
+def make_lagged_xy(
+    series: pd.Series,
+    p: int,
+):
     """
-    Prepare lagged data for training.
+    Prepare lagged data for one-step-ahead training.
+
+    For p=1, X_t contains the current value and y_t is the next value.
+    This matches the two-bottom script.
     """
+
     X = pd.concat(
         [
             series.shift(l)
-            for l in range(1, p + 1)
+            for l in range(0, p)
         ],
         axis=1,
     )
 
     X.columns = [
         f"{series.name}_lag{l}"
-        for l in range(1, p + 1)
+        for l in range(0, p)
     ]
 
     y = series.shift(-1)
 
-    return X, y
+    valid = (
+        X.notna().all(axis=1)
+        & y.notna()
+    )
+
+    return (
+        X.loc[valid],
+        y.loc[valid],
+    )
 
 
 # ================================
 # Data validation
 # ================================
 
-def get_expected_columns(dimension: int):
+def get_expected_columns(
+    dimension: int,
+):
     """
     Return the expected dataset columns:
 
         U, B1, B2, ..., Bd
     """
+
     return [
         "U",
         *[
             f"B{i}"
-            for i in range(1, dimension + 1)
+            for i in range(
+                1,
+                dimension + 1,
+            )
         ],
     ]
 
@@ -58,12 +79,11 @@ def validate_dataset(
     dimension: int,
 ):
     """
-    Validate and select the expected columns for a dataset.
-
-    Expected columns:
+    Validate and select the expected columns:
 
         U, B1, B2, ..., Bd
     """
+
     expected_columns = get_expected_columns(
         dimension
     )
@@ -98,10 +118,8 @@ def plot_constraint_surface(
 ):
     """
     Plot the d=2 constraint surface in 3D.
-
-    This function is used only for visualization of datasets
-    with two bottom-level series.
     """
+
     x = np.linspace(
         x_range[0],
         x_range[1],
@@ -159,24 +177,20 @@ def plot_predictions(
     y_hat_te,
     surface,
     dimension,
+    dataset_tag,
     fig_folder,
 ):
     """
     Plot ground truth and deterministic predictions.
 
-    For d=2, all series are shown:
-
-        U, B1, B2
-
-    For d>2, only the following are shown to keep the figure readable:
-
-        U, B1, B2
+    For d=2, all series are shown.
+    For d>2, only U, B1, and B2 are shown to keep the figure readable.
     """
+
     if dimension == 2:
         plot_columns = list(
             data.columns
         )
-
     else:
         plot_columns = [
             "U",
@@ -201,7 +215,7 @@ def plot_predictions(
     ):
         ax.plot(
             df_te.index[:-1],
-            df_te[col].iloc[:-1],
+            df_te[col].iloc[1:],
             label=f"{col} (GT)",
             color=colors(i),
         )
@@ -221,9 +235,10 @@ def plot_predictions(
     fig.savefig(
         os.path.join(
             fig_folder,
-            f"{surface}_d{dimension}_pred.png",
+            f"{surface}_{dataset_tag}_d{dimension}_pred.png",
         ),
         dpi=300,
+        bbox_inches="tight",
     )
 
     plt.close(fig)
@@ -238,21 +253,21 @@ def plot_3d_samples(
     y_hat_te_samples_tm,
     surface,
     dimension,
+    dataset_tag,
     fig_folder,
 ):
     """
     Plot forecast samples in 3D.
 
-    The input array has shape:
+    Input shape:
 
         (n_test_steps, n_samples, d + 1)
 
-    with variable order:
+    Variable order:
 
         U, B1, ..., Bd
-
-    This function is called only when d=2.
     """
+
     if dimension != 2:
         return
 
@@ -313,7 +328,7 @@ def plot_3d_samples(
     fig.write_html(
         os.path.join(
             fig_folder,
-            f"{surface}_d{dimension}_3d.html",
+            f"{surface}_{dataset_tag}_d{dimension}_3d.html",
         )
     )
 
@@ -326,71 +341,25 @@ def fit_predictive_model(
     data,
     surface,
     dimension,
+    dataset_tag,
     fig_folder,
     tr_ratio=0.8,
     n_estimators=100,
     criterion="absolute_error",
     n_samples=1000,
+    random_state=42,
 ):
     """
-    Fit one Random Forest model for every series and generate
-    forecast samples using joint residual bootstrapping.
-
-    The input data contain:
-
-        U, B1, ..., Bd
+    Fit one Random Forest model for every series and generate forecast samples
+    using joint residual bootstrapping.
 
     The residual bootstrap samples complete residual vectors:
 
         (e_U, e_B1, ..., e_Bd)
 
-    so contemporaneous residual dependence across all variables
-    is preserved.
-
-    Parameters
-    ----------
-    data : pd.DataFrame
-        Dataset containing U and all bottom-level series.
-
-    surface : str
-        Surface name.
-
-    dimension : int
-        Number of bottom-level series.
-
-    fig_folder : str
-        Folder where figures are saved.
-
-    tr_ratio : float
-        Fraction of observations used for training.
-
-    n_estimators : int
-        Number of trees in each Random Forest model.
-
-    criterion : str
-        Random Forest splitting criterion.
-
-    n_samples : int
-        Number of bootstrap forecast samples.
-
-    Returns
-    -------
-    y_hat_te_samples : np.ndarray
-        Forecast samples with shape:
-
-            (d + 1, n_test_steps, n_samples)
-
-    rf_residuals : np.ndarray
-        Training residuals with shape:
-
-            (d + 1, n_valid_train_steps)
-
-    y_hat_te : pd.DataFrame
-        Deterministic test forecasts.
-
-    df_te : pd.DataFrame
-        Test data.
+    so contemporaneous residual dependence across all variables is preserved.
     """
+
     # ---------------------------
     # Validate and select columns
     # ---------------------------
@@ -406,7 +375,7 @@ def fit_predictive_model(
 
     print(
         f"Fitting {n_variables} models "
-        f"for surface={surface}, d={dimension}"
+        f"for surface={surface}, d={dimension}, n_samples={n_samples}"
     )
 
     # ---------------------------
@@ -414,7 +383,8 @@ def fit_predictive_model(
     # ---------------------------
 
     split_idx = int(
-        tr_ratio * len(data)
+        tr_ratio
+        * len(data)
     )
 
     df_tr = data.iloc[
@@ -438,6 +408,12 @@ def fit_predictive_model(
         dtype=float,
     )
 
+    y_tr_actual = pd.DataFrame(
+        index=y_hat_tr.index,
+        columns=data.columns,
+        dtype=float,
+    )
+
     # ---------------------------
     # Fit one model per variable
     # ---------------------------
@@ -456,20 +432,15 @@ def fit_predictive_model(
             p=1,
         )
 
-        valid_tr = X_tr.index[
-            X_tr.notna().all(axis=1)
-            & y_tr.notna()
-        ]
-
         model = RandomForestRegressor(
             n_estimators=n_estimators,
             criterion=criterion,
-            random_state=42,
+            random_state=random_state,
         )
 
         model.fit(
-            X_tr.loc[valid_tr],
-            y_tr.loc[valid_tr],
+            X_tr,
+            y_tr,
         )
 
         X_te, _ = make_lagged_xy(
@@ -477,60 +448,41 @@ def fit_predictive_model(
             p=1,
         )
 
-        valid_te = (
-            X_te.index[
-                X_te.notna().all(axis=1)
-            ]
-            .intersection(
-                y_hat_te.index
-            )
+        valid_te = X_te.index.intersection(
+            y_hat_te.index
         )
 
         y_hat_tr.loc[
-            valid_tr,
+            X_tr.index,
             col,
         ] = model.predict(
-            X_tr.loc[valid_tr]
+            X_tr
         )
+
+        y_tr_actual.loc[
+            y_tr.index,
+            col,
+        ] = y_tr
 
         y_hat_te.loc[
             valid_te,
             col,
         ] = model.predict(
-            X_te.loc[valid_te]
+            X_te.loc[
+                valid_te
+            ]
         )
-
-    # ---------------------------
-    # Preserve original first-forecast alignment
-    # ---------------------------
-
-    for col in data.columns:
-        y_hat_tr.loc[
-            y_hat_tr.index[0],
-            col,
-        ] = df_tr[col].iloc[0]
-
-        y_hat_te.loc[
-            y_hat_te.index[0],
-            col,
-        ] = df_tr[col].iloc[-1]
 
     # ---------------------------
     # Joint residual bootstrap
     # ---------------------------
+    # y_hat_tr at origin t forecasts the next observation t+1.
 
-    # Calculate residuals for all variables together.
-    #
-    # Shape:
-    #
-    #     (n_train_steps, d + 1)
-    #
     tr_errors = (
-        df_tr.iloc[:-1].values
+        y_tr_actual.values
         - y_hat_tr.values
     ).astype(float)
 
-    # Remove rows containing any NaN.
     tr_errors = tr_errors[
         ~np.isnan(
             tr_errors
@@ -543,11 +495,11 @@ def fit_predictive_model(
             f"for surface={surface}, d={dimension}"
         )
 
+    # Shape: (n_valid_train_steps, d + 1)
     res_mat = tr_errors
 
     print(
-        f"Residual matrix shape: "
-        f"{res_mat.shape}"
+        f"Residual matrix shape: {res_mat.shape}"
     )
 
     # ---------------------------
@@ -557,41 +509,42 @@ def fit_predictive_model(
     n_test_steps = len(
         y_hat_te
     )
-    rng = np.random.default_rng(42)
-    idx = np.random.randint(0, len(res_mat), size=(n_test_steps, n_samples))
 
-    # Sample complete residual rows.
-    #
-    # Shape:
-    #
-    #     (n_test_steps, n_samples, d + 1)
-    #
-    y_hat_te_samples_tm = res_mat[
+    rng = np.random.default_rng(
+        random_state
+    )
+
+    idx = rng.integers(
+        0,
+        len(res_mat),
+        size=(
+            n_test_steps,
+            n_samples,
+        ),
+    )
+
+    # eps shape: (n_test_steps, n_samples, d + 1)
+    eps = res_mat[
         idx
-    ].copy()
+    ]
 
-    # Add deterministic point forecasts.
-    #
-    # y_hat_te.values[:, None, :] has shape:
-    #
+    # y_hat_te.values[:, None, :] shape:
     #     (n_test_steps, 1, d + 1)
-    #
-    # Broadcasting gives:
-    #
+    y_hat_te_point = y_hat_te.values[
+        :,
+        None,
+        :,
+    ]
+
+    # Shape:
     #     (n_test_steps, n_samples, d + 1)
-    #
-    y_hat_te_samples_tm += (
-        y_hat_te.values[
-            :,
-            None,
-            :,
-        ]
+    y_hat_te_samples_tm = (
+        y_hat_te_point
+        + eps
     )
 
     # Output format:
-    #
     #     (d + 1, n_test_steps, n_samples)
-    #
     y_hat_te_samples = np.transpose(
         y_hat_te_samples_tm,
         (
@@ -602,19 +555,15 @@ def fit_predictive_model(
     )
 
     # Residual output format:
-    #
     #     (d + 1, n_valid_train_steps)
-    #
     rf_residuals = res_mat.T
 
     print(
-        f"Forecast sample shape: "
-        f"{y_hat_te_samples.shape}"
+        f"Forecast sample shape: {y_hat_te_samples.shape}"
     )
 
     print(
-        f"Residual output shape: "
-        f"{rf_residuals.shape}"
+        f"Residual output shape: {rf_residuals.shape}"
     )
 
     # ---------------------------
@@ -627,6 +576,7 @@ def fit_predictive_model(
         y_hat_te=y_hat_te,
         surface=surface,
         dimension=dimension,
+        dataset_tag=dataset_tag,
         fig_folder=fig_folder,
     )
 
@@ -636,11 +586,10 @@ def fit_predictive_model(
 
     if dimension == 2:
         plot_3d_samples(
-            y_hat_te_samples_tm=(
-                y_hat_te_samples_tm
-            ),
+            y_hat_te_samples_tm=y_hat_te_samples_tm,
             surface=surface,
             dimension=dimension,
+            dataset_tag=dataset_tag,
             fig_folder=fig_folder,
         )
 
@@ -663,6 +612,7 @@ def save_pickle(
     """
     Save an object as a pickle file.
     """
+
     with open(
         file_path,
         "wb",
@@ -671,6 +621,55 @@ def save_pickle(
             obj,
             file,
         )
+
+
+def find_data_file(
+    data_folder,
+    surface,
+    dimension,
+    dataset_tag,
+):
+    """
+    Find the data file.
+
+    Preferred naming, from the high-dimensional data generator:
+
+        {surface}_data_{dataset_tag}_d{dimension}.pkl
+
+    Fallbacks are included for older file names.
+    """
+
+    candidates = [
+        os.path.join(
+            data_folder,
+            f"{surface}_data_{dataset_tag}_d{dimension}.pkl",
+        ),
+        os.path.join(
+            data_folder,
+            f"{surface}_data_d{dimension}.pkl",
+        ),
+    ]
+
+    if dimension == 2:
+        candidates.append(
+            os.path.join(
+                data_folder,
+                f"{surface}_data_{dataset_tag}.pkl",
+            )
+        )
+
+    for file_path in candidates:
+        if os.path.exists(
+            file_path
+        ):
+            return file_path
+
+    raise FileNotFoundError(
+        "Could not find data file. Tried:\n"
+        + "\n".join(
+            candidates
+        )
+    )
 
 
 # ==========================
@@ -692,122 +691,169 @@ def main():
         exist_ok=True,
     )
 
+    dataset_tag = "indep"
+
     dimensions = [
-        2,
-        # 10,
-        # 20,
-        # 50,
-        # 100,
-        # 200
+        10,
+        20,
+        50,
     ]
 
     surfaces = [
         "paraboloid",
         "saddle",
         "ripples",
-        "linear",
     ]
 
-    n_samples = 2000
+    sample_sizes = [
+        500,
+        1000,
+        2000,
+        5000,
+        10000,
+        20000,
+    ]
+
+    random_state = 42
 
     for dimension in dimensions:
         print()
         print("=" * 70)
         print(
-            f"Bottom-level dimension: "
-            f"d={dimension}"
+            f"Bottom-level dimension: d={dimension}"
         )
         print("=" * 70)
 
         for surface in surfaces:
             print()
             print(
-                f"=== Surface {surface}, "
-                f"d={dimension} ==="
+                f"=== Surface {surface}, d={dimension}, "
+                f"dataset={dataset_tag} ==="
             )
 
-            data_file = os.path.join(
-                data_folder,
-                f"{surface}_data_d{dimension}.pkl",
+            data_file = find_data_file(
+                data_folder=data_folder,
+                surface=surface,
+                dimension=dimension,
+                dataset_tag=dataset_tag,
+            )
+
+            print(
+                f"Loading data: {data_file}"
             )
 
             data = pd.read_pickle(
                 data_file
             )
 
-            (
-                base_fc,
-                residuals,
-                deterministic_forecasts,
-                test_data,
-            ) = fit_predictive_model(
-                data=data,
-                surface=surface,
-                dimension=dimension,
-                fig_folder=fig_folder,
-                n_samples=n_samples,
-            )
+            for n_samples in sample_sizes:
+                print()
+                print(
+                    f"Generating forecasts with n_samples={n_samples}"
+                )
 
-            # ---------------------------
-            # Save forecast samples
-            # ---------------------------
+                (
+                    base_fc,
+                    residuals,
+                    deterministic_forecasts,
+                    test_data,
+                ) = fit_predictive_model(
+                    data=data,
+                    surface=surface,
+                    dimension=dimension,
+                    dataset_tag=dataset_tag,
+                    fig_folder=fig_folder,
+                    n_samples=n_samples,
+                    random_state=random_state,
+                )
 
-            save_pickle(
-                base_fc,
-                os.path.join(
-                    fc_folder,
-                    f"base_fc_{surface}_"
-                    f"d{dimension}_"
-                    f"{n_samples}.pkl",
-                ),
-            )
+                # ---------------------------
+                # Save forecast samples
+                # ---------------------------
 
-            # ---------------------------
-            # Save residuals
-            # ---------------------------
+                save_pickle(
+                    base_fc,
+                    os.path.join(
+                        fc_folder,
+                        f"base_fc_{surface}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
 
-            save_pickle(
-                residuals,
-                os.path.join(
-                    fc_folder,
-                    f"residuals_{surface}_"
-                    f"d{dimension}_"
-                    f"{n_samples}.pkl",
-                ),
-            )
+                # Optional tagged copy, useful if you want names parallel to
+                # the two-bottom script.
+                save_pickle(
+                    base_fc,
+                    os.path.join(
+                        fc_folder,
+                        f"base_fc_{surface}_{dataset_tag}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
 
-            # ---------------------------
-            # Save test data
-            # ---------------------------
+                # ---------------------------
+                # Save residuals
+                # ---------------------------
 
-            save_pickle(
-                test_data,
-                os.path.join(
-                    fc_folder,
-                    f"test_data_{surface}_"
-                    f"d{dimension}_"
-                    f"{n_samples}.pkl",
-                ),
-            )
+                save_pickle(
+                    residuals,
+                    os.path.join(
+                        fc_folder,
+                        f"residuals_{surface}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
 
-            # ---------------------------
-            # Save deterministic forecasts
-            # ---------------------------
+                save_pickle(
+                    residuals,
+                    os.path.join(
+                        fc_folder,
+                        f"residuals_{surface}_{dataset_tag}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
 
-            save_pickle(
-                deterministic_forecasts,
-                os.path.join(
-                    fc_folder,
-                    f"det_forecasts_{surface}_"
-                    f"d{dimension}_"
-                    f"{n_samples}.pkl",
-                ),
-            )
+                # ---------------------------
+                # Save test data
+                # ---------------------------
 
-            print(
-                f"Completed surface={surface}, "
-                f"d={dimension}"
-            )
+                save_pickle(
+                    test_data,
+                    os.path.join(
+                        fc_folder,
+                        f"test_data_{surface}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
+
+                save_pickle(
+                    test_data,
+                    os.path.join(
+                        fc_folder,
+                        f"test_data_{surface}_{dataset_tag}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
+
+                # ---------------------------
+                # Save deterministic forecasts
+                # ---------------------------
+
+                save_pickle(
+                    deterministic_forecasts,
+                    os.path.join(
+                        fc_folder,
+                        f"det_forecasts_{surface}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
+
+                save_pickle(
+                    deterministic_forecasts,
+                    os.path.join(
+                        fc_folder,
+                        f"det_forecasts_{surface}_{dataset_tag}_d{dimension}_{n_samples}.pkl",
+                    ),
+                )
+
+                print(
+                    f"Completed surface={surface}, "
+                    f"d={dimension}, "
+                    f"n_samples={n_samples}"
+                )
 
 
 if __name__ == "__main__":
